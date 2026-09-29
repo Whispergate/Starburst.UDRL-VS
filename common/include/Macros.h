@@ -9,7 +9,6 @@
 #define Instance()        ( ( PINSTANCE ) __LocalInstance )
 #define STARDUST_INSTANCE PINSTANCE __LocalInstance = InstancePtr();
 
-
 //
 // utils macros
 //
@@ -18,6 +17,9 @@
 #define FUNC        D_SEC( B )
 #define ST_GLOBAL   __attribute__( ( section( ".global" ) ) )
 #define ST_READONLY __attribute__( ( section( ".rdata" ) ) )
+#define MOD( x ) Instance()->Modules.x
+#define API( x ) Instance()->Win32.x
+#define RESOLVE( x, y ) API( x ) = (__typeof__( x )*)LdrFunction( MOD( y ), HASH_STR( #x ) )
 
 //
 // casting macros
@@ -37,6 +39,17 @@
 #define C_DEF16( x ) ( * ( UINT16* ) ( x ) )
 #define C_DEF32( x ) ( * ( UINT32* ) ( x ) )
 #define C_DEF64( x ) ( * ( UINT64* ) ( x ) )
+
+//
+// print macros
+//
+#ifdef DEBUG
+    #define PRINT(format, ...) PrintMsg(__FUNCTION__, FALSE, format, ##__VA_ARGS__)
+    #define PRINTB(format, ...) PrintMsg(__FUNCTION__, TRUE, format, ##__VA_ARGS__)
+#else
+    #define PRINT(format, ...) ;
+    #define PRINTB(format, ...) ;
+#endif
 
 //
 // memory related macros

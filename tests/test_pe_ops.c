@@ -1,9 +1,10 @@
 /*
- * Unit tests for UDRL PE operations: header parsing, section mapping,
- * relocation processing, IAT stub resolution, and UDRL_USER_DATA population.
+ * Unit tests for UDRL PE operations: LdrpImageHeader, LdrFunction,
+ * section mapping, relocation processing, section protections,
+ * UDRL_USER_DATA population, headerless loader variant, and full load cycle.
  *
- * Core logic is copied verbatim from loader/src/Main.c.
- * Tests use synthetic PEs from mock_pe.h's build_test_pe / build_test_pe_with_relocs.
+ * Core logic is copied verbatim from loader/src/\*.
+ * Tests use synthetic PEs from mock_pe.h.
  */
 
 #include "test.h"
@@ -11,7 +12,75 @@
 
 #define FUNC  /* PIC marker - no-op in test builds */
 
-/* SectionToProtect, copied from loader/src/Main.c */
+/* ========================================================================
+ * Functions under test
+ * ====================================================================== */
+
+/* From loader/src/Utils.c */
+FUNC static ULONG HashString(
+    _In_ PVOID  String,
+    _In_ SIZE_T Length
+) {
+    ULONG  Hash = { 0 };
+    PUCHAR Ptr  = { 0 };
+    UCHAR  Char = { 0 };
+
+    if ( ! String ) {
+        return 0;
+    }
+
+    Hash = H_MAGIC_KEY;
+    Ptr  = ( ( PUCHAR ) String );
+
+    do {
+        Char = *Ptr;
+
+        if ( ! Length ) {
+            if ( ! *Ptr ) break;
+        } else {
+            if ( U_PTR( Ptr - U_PTR( String ) ) >= Length ) break;
+            if ( !*Ptr ) ++Ptr;
+        }
+
+        if ( Char >= 'a' ) {
+            Char -= 0x20;
+        }
+
+        Hash = ( ( Hash << H_MAGIC_SEED ) + Hash ) + Char;
+
+        ++Ptr;
+    } while ( TRUE );
+
+    return Hash;
+}
+
+/* From loader/include/Constexpr.h */
+CONSTEXPR ULONG ExprHashStringA(
+    _In_ PCHAR String
+) {
+    ULONG Hash = { 0 };
+    CHAR  Char = { 0 };
+
+    Hash = H_MAGIC_KEY;
+
+    if ( ! String ) {
+        return 0;
+    }
+
+    while ( ( Char = *String++ ) ) {
+        if ( Char >= 'a' ) {
+            Char -= 0x20;
+        }
+
+        Hash = ( ( Hash << H_MAGIC_SEED ) + Hash ) + Char;
+    }
+
+    return Hash;
+}
+
+#define HASH_STR( x ) ExprHashStringA( ( x ) )
+
+/* From loader/src/Main.c */
 FUNC static DWORD SectionToProtect( DWORD ch ) {
     BOOL x = !!( ch & IMAGE_SCN_MEM_EXECUTE );
     BOOL r = !!( ch & IMAGE_SCN_MEM_READ    );
@@ -27,7 +96,6 @@ FUNC static DWORD SectionToProtect( DWORD ch ) {
     return PAGE_NOACCESS;
 }
 
-/* GenerateRc4Key, copied from loader/src/Main.c */
 FUNC static VOID GenerateRc4Key( PBYTE Key ) {
     for ( int i = 0; i < 16; i += 4 ) {
         DWORD tick;
@@ -40,10 +108,79 @@ FUNC static VOID GenerateRc4Key( PBYTE Key ) {
     }
 }
 
+/* From loader/src/Ldr.c */
+FUNC static PIMAGE_NT_HEADERS LdrpImageHeader(
+    _In_ PVOID Image
+) {
+    PIMAGE_DOS_HEADER DosHeader = { 0 };
+    PIMAGE_NT_HEADERS NtHeader  = { 0 };
+
+    DosHeader = C_PTR( Image );
+
+    if ( DosHeader->e_magic != IMAGE_DOS_SIGNATURE ) {
+        return NULL;
+    }
+
+    NtHeader = C_PTR( U_PTR( Image ) + DosHeader->e_lfanew );
+
+    if ( NtHeader->Signature != IMAGE_NT_SIGNATURE ) {
+        return NULL;
+    }
+
+    return NtHeader;
+}
+
+/* From loader/src/Ldr.c */
+FUNC static PVOID LdrFunction(
+    _In_ PVOID Library,
+    _In_ ULONG Function
+) {
+    PVOID                   Address    = { 0 };
+    PIMAGE_NT_HEADERS       NtHeader   = { 0 };
+    PIMAGE_EXPORT_DIRECTORY ExpDir     = { 0 };
+    SIZE_T                  ExpDirSize = { 0 };
+    PDWORD                  AddrNames  = { 0 };
+    PDWORD                  AddrFuncs  = { 0 };
+    PWORD                   AddrOrdns  = { 0 };
+    PCHAR                   FuncName   = { 0 };
+
+    if ( ! Library || ! Function ) {
+        return NULL;
+    }
+
+    if ( ! ( NtHeader = LdrpImageHeader( Library ) ) ) {
+        return NULL;
+    }
+
+    ExpDir     = C_PTR( Library + NtHeader->OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_EXPORT ].VirtualAddress );
+    ExpDirSize = NtHeader->OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_EXPORT ].Size;
+    AddrNames  = C_PTR( Library + ExpDir->AddressOfNames );
+    AddrFuncs  = C_PTR( Library + ExpDir->AddressOfFunctions );
+    AddrOrdns  = C_PTR( Library + ExpDir->AddressOfNameOrdinals );
+
+    for ( DWORD i = 0; i < ExpDir->NumberOfNames; i++ ) {
+        FuncName = C_PTR( U_PTR( Library ) + AddrNames[ i ] );
+
+        if ( HashString( FuncName, 0 ) != Function ) {
+            continue;
+        }
+
+        Address = C_PTR( U_PTR( Library ) + AddrFuncs[ AddrOrdns[ i ] ] );
+
+        if ( ( U_PTR( Address ) >= U_PTR( ExpDir ) ) &&
+             ( U_PTR( Address ) <  U_PTR( ExpDir ) + ExpDirSize )
+        ) {
+            __debugbreak();
+        }
+
+        break;
+    }
+
+    return Address;
+}
+
 /* ========================================================================
  * Helper: map a synthetic PE into a "mapped" buffer the way the loader does.
- * Returns the mapped base (calloc'd). Caller must free().
- * Sets *nt_out to point to the NT headers in the mapped image.
  * ====================================================================== */
 
 static PBYTE map_test_pe(PBYTE raw, PIMAGE_NT_HEADERS *nt_out) {
@@ -118,6 +255,121 @@ static void apply_relocations(PBYTE mapped, PIMAGE_NT_HEADERS nt, LONGLONG delta
         }
         reloc = C_PTR((PBYTE)reloc + reloc->SizeOfBlock);
     }
+}
+
+/* ========================================================================
+ * LdrpImageHeader tests
+ * ====================================================================== */
+
+static void test_ldr_image_header_valid(void) {
+    TEST("LdrpImageHeader: valid PE returns correct NT headers");
+    DWORD sz;
+    PBYTE pe = build_test_pe(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    PIMAGE_NT_HEADERS nt = LdrpImageHeader(pe);
+    ASSERT_NOT_NULL(nt);
+    ASSERT_EQ(nt->Signature, IMAGE_NT_SIGNATURE);
+    ASSERT_EQ(nt->FileHeader.Machine, IMAGE_FILE_MACHINE_AMD64);
+    ASSERT_EQ(nt->FileHeader.NumberOfSections, 2);
+
+    free(pe);
+    PASS();
+}
+
+static void test_ldr_image_header_bad_dos(void) {
+    TEST("LdrpImageHeader: invalid DOS magic returns NULL");
+    DWORD sz;
+    PBYTE pe = build_test_pe(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    ((PIMAGE_DOS_HEADER)pe)->e_magic = 0xBEEF;
+    ASSERT_NULL(LdrpImageHeader(pe));
+
+    free(pe);
+    PASS();
+}
+
+static void test_ldr_image_header_bad_nt(void) {
+    TEST("LdrpImageHeader: invalid NT signature returns NULL");
+    DWORD sz;
+    PBYTE pe = build_test_pe(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pe;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(pe + dos->e_lfanew);
+    nt->Signature = 0xDEADDEAD;
+    ASSERT_NULL(LdrpImageHeader(pe));
+
+    free(pe);
+    PASS();
+}
+
+/* ========================================================================
+ * LdrFunction tests
+ * ====================================================================== */
+
+static void test_ldr_function_resolve_alpha(void) {
+    TEST("LdrFunction: resolves FuncAlpha by hash");
+    DWORD sz;
+    PBYTE pe = build_test_pe_with_exports(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    ULONG hash = HASH_STR("FuncAlpha");
+    PVOID addr = LdrFunction(pe, hash);
+
+    ASSERT_NOT_NULL(addr);
+    ASSERT_EQ((ULONG_PTR)addr, (ULONG_PTR)pe + 0x1000);
+
+    free(pe);
+    PASS();
+}
+
+static void test_ldr_function_resolve_beta(void) {
+    TEST("LdrFunction: resolves FuncBeta by hash");
+    DWORD sz;
+    PBYTE pe = build_test_pe_with_exports(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    ULONG hash = HASH_STR("FuncBeta");
+    PVOID addr = LdrFunction(pe, hash);
+
+    ASSERT_NOT_NULL(addr);
+    ASSERT_EQ((ULONG_PTR)addr, (ULONG_PTR)pe + 0x1020);
+
+    free(pe);
+    PASS();
+}
+
+static void test_ldr_function_unknown_hash(void) {
+    TEST("LdrFunction: unknown hash returns NULL");
+    DWORD sz;
+    PBYTE pe = build_test_pe_with_exports(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    PVOID addr = LdrFunction(pe, 0xDEADBEEF);
+    ASSERT_NULL(addr);
+
+    free(pe);
+    PASS();
+}
+
+static void test_ldr_function_null_library(void) {
+    TEST("LdrFunction: NULL library returns NULL");
+    ASSERT_NULL(LdrFunction(NULL, 0x12345678));
+    PASS();
+}
+
+static void test_ldr_function_zero_hash(void) {
+    TEST("LdrFunction: zero hash returns NULL");
+    DWORD sz;
+    PBYTE pe = build_test_pe_with_exports(&sz);
+    ASSERT_NOT_NULL(pe);
+
+    ASSERT_NULL(LdrFunction(pe, 0));
+
+    free(pe);
+    PASS();
 }
 
 /* ========================================================================
@@ -646,7 +898,7 @@ static void test_headerless_relocs_from_raw(void) {
  * ====================================================================== */
 
 static void test_full_load_cycle(void) {
-    TEST("Full cycle: parse → map → relocate → protect → populate userdata");
+    TEST("Full cycle: parse -> map -> relocate -> protect -> populate userdata");
     DWORD sz;
     PBYTE raw = build_test_pe_with_relocs(&sz);
     ASSERT_NOT_NULL(raw);
@@ -718,6 +970,18 @@ static void test_full_load_cycle(void) {
  * ====================================================================== */
 
 int main(void) {
+    TEST_SUITE("LdrpImageHeader");
+    test_ldr_image_header_valid();
+    test_ldr_image_header_bad_dos();
+    test_ldr_image_header_bad_nt();
+
+    TEST_SUITE("LdrFunction");
+    test_ldr_function_resolve_alpha();
+    test_ldr_function_resolve_beta();
+    test_ldr_function_unknown_hash();
+    test_ldr_function_null_library();
+    test_ldr_function_zero_hash();
+
     TEST_SUITE("PE Header Parsing");
     test_pe_dos_valid();
     test_pe_nt_valid();

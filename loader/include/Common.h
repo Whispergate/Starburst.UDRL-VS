@@ -2,8 +2,7 @@
 #define STARDUST_COMMON_H
 
 #include <windows.h>
-#include <Native.h>
-#include <Macros.h>
+#include <common.h>
 #include <Ldr.h>
 #include <Defs.h>
 #include <Utils.h>
@@ -16,24 +15,20 @@ typedef struct _INSTANCE {
     BUFFER Base;
 
     struct {
-        /* ntdll.dll */
-        D_API( RtlAllocateHeap        )
-        D_API( NtProtectVirtualMemory  )
-        D_API( NtFlushInstructionCache )
 
-        /* kernel32.dll */
-        D_API( LoadLibraryA   )
-        D_API( LoadLibraryExW )
-        D_API( GetProcAddress )
-        D_API( VirtualAlloc   )
-        D_API( VirtualProtect )
-        D_API( VirtualFree    )
+        #define API_ENTRY(x, y) D_API(x)
+        API_LIST
+        #undef API_ENTRY
 
     } Win32;
 
     struct {
         PVOID Ntdll;
         PVOID Kernel32;
+
+        #define DLL_ENTRY(x) PVOID x;
+        DLL_LIST
+        #undef DLL_ENTRY
     } Modules;
 
 } INSTANCE, *PINSTANCE;

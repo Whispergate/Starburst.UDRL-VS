@@ -33,7 +33,7 @@ static ULONG_PTR dispatch_call( PFUNCTION_CALL fc ) {
     return ret;
 }
 
-/* From mask/src/main.c: full sleep_mask (base XOR mask) */
+/* From examples/mask-xor/main.c: simplified sleep_mask (flat regions) */
 static VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
@@ -70,7 +70,7 @@ static VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall 
     }
 }
 
-/* From examples/mask-erase/main.c: erase mask sleep_mask */
+/* From examples/mask-erase/main.c: erase mask */
 static VOID sleep_mask_erase( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
@@ -124,26 +124,94 @@ static VOID sleep_mask_erase( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functio
     }
 }
 
+/* From mask/src/main.c: production sleep_mask (nested region/section struct) */
+static VOID sleep_mask_prod( PSM_BEACON_INFO_PROD beaconInfo, PFUNCTION_CALL functionCall ) {
+
+    if ( ! functionCall )
+        return;
+
+    if ( ! functionCall->bMask ) {
+        functionCall->retValue = dispatch_call( functionCall );
+        return;
+    }
+
+    for ( int r = 0; r < SM_MAX_REGIONS_PROD; r++ ) {
+        SM_ALLOC_REGION_PROD *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+
+        for ( int s = 0; s < SM_MAX_SECTIONS_PROD; s++ ) {
+            SM_ALLOC_SECTION_PROD *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
+
+            xor_region(
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
+                (unsigned char *) beaconInfo->mask,
+                SM_MASK_SIZE_PROD
+            );
+        }
+    }
+
+    functionCall->retValue = dispatch_call( functionCall );
+
+    for ( int r = 0; r < SM_MAX_REGIONS_PROD; r++ ) {
+        SM_ALLOC_REGION_PROD *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+
+        for ( int s = 0; s < SM_MAX_SECTIONS_PROD; s++ ) {
+            SM_ALLOC_SECTION_PROD *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
+
+            xor_region(
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
+                (unsigned char *) beaconInfo->mask,
+                SM_MASK_SIZE_PROD
+            );
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
-/* Test helper functions for dispatch_call tests.                     */
+/* Test helper functions                                              */
 /* ------------------------------------------------------------------ */
 
 static ULONG_PTR test_func_0( void ) {
     return 0x42;
 }
 
+static ULONG_PTR test_func_1( ULONG_PTR a ) {
+    return a * 2;
+}
+
 static ULONG_PTR test_func_2( ULONG_PTR a, ULONG_PTR b ) {
     return a + b;
 }
 
-/* No-op function used when we only care about the mask cycle */
+static ULONG_PTR test_func_3( ULONG_PTR a, ULONG_PTR b, ULONG_PTR c ) {
+    return a + b + c;
+}
+
+static ULONG_PTR test_func_10( ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d, ULONG_PTR e,
+                                ULONG_PTR f, ULONG_PTR g, ULONG_PTR h, ULONG_PTR i, ULONG_PTR j ) {
+    return a + b + c + d + e + f + g + h + i + j;
+}
+
 static ULONG_PTR noop_func( void ) {
     return 0xBEEF;
 }
 
-/* ------------------------------------------------------------------ */
-/* Helper: fill a buffer with a repeating pattern.                    */
-/* ------------------------------------------------------------------ */
+static ULONG_PTR gate_test_func( void ) {
+    return 0x1337;
+}
 
 static void fill_pattern( unsigned char *buf, unsigned int len, const char *pat ) {
     unsigned int pat_len = (unsigned int) strlen( pat );
@@ -167,11 +235,9 @@ static void test_xor_roundtrip( void ) {
     memcpy( orig, buf, 32 );
 
     xor_region( buf, 32, key, 4 );
-    /* After first XOR, data should differ */
     ASSERT_TRUE( memcmp( buf, orig, 32 ) != 0 );
 
     xor_region( buf, 32, key, 4 );
-    /* After second XOR, data should be restored */
     ASSERT_MEM_EQ( buf, orig, 32 );
 
     PASS();
@@ -201,7 +267,6 @@ static void test_xor_single_byte_key( void ) {
 
     xor_region( buf, 8, key, 1 );
 
-    /* Each byte should be XOR'd with 0xFF */
     ASSERT_EQ( buf[0], 0x10 ^ 0xFF );
     ASSERT_EQ( buf[1], 0x20 ^ 0xFF );
     ASSERT_EQ( buf[2], 0x30 ^ 0xFF );
@@ -225,15 +290,11 @@ static void test_xor_16byte_key_wraps( void ) {
 
     xor_region( buf, 32, key, 16 );
 
-    /* Byte 0 and byte 16 should both be XOR'd with key[0] */
     ASSERT_EQ( buf[0], 0x41 ^ key[0] );
     ASSERT_EQ( buf[16], 0x41 ^ key[0] );
-
-    /* Byte 1 and byte 17 should both be XOR'd with key[1] */
     ASSERT_EQ( buf[1], 0x41 ^ key[1] );
     ASSERT_EQ( buf[17], 0x41 ^ key[1] );
 
-    /* Roundtrip check */
     xor_region( buf, 32, key, 16 );
     ASSERT_MEM_EQ( buf, orig, 32 );
 
@@ -247,7 +308,6 @@ static void test_xor_empty_buffer( void ) {
     unsigned char key[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 
     xor_region( buf, 0, key, 4 );
-    /* Buffer should be unchanged */
     ASSERT_EQ( buf[0], 0x42 );
 
     PASS();
@@ -281,6 +341,34 @@ static void test_xor_large_buffer( void ) {
     PASS();
 }
 
+static void test_xor_guard_bytes( void ) {
+    TEST( "xor_region: does not write beyond buffer bounds" );
+
+    unsigned char mem[40];
+    memset( mem, 0xAA, sizeof( mem ) );
+
+    unsigned char key[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+
+    /* XOR only the middle 32 bytes, leaving 4 guard bytes on each side */
+    xor_region( mem + 4, 32, key, 4 );
+
+    /* Guard bytes should be untouched */
+    ASSERT_EQ( mem[0], 0xAA );
+    ASSERT_EQ( mem[1], 0xAA );
+    ASSERT_EQ( mem[2], 0xAA );
+    ASSERT_EQ( mem[3], 0xAA );
+    ASSERT_EQ( mem[36], 0xAA );
+    ASSERT_EQ( mem[37], 0xAA );
+    ASSERT_EQ( mem[38], 0xAA );
+    ASSERT_EQ( mem[39], 0xAA );
+
+    /* Middle bytes should be modified (0xAA ^ 0xFF = 0x55) */
+    ASSERT_EQ( mem[4], 0x55 );
+    ASSERT_EQ( mem[35], 0x55 );
+
+    PASS();
+}
+
 /* ================================================================== */
 /*                        DISPATCH CALL                               */
 /* ================================================================== */
@@ -295,6 +383,21 @@ static void test_dispatch_0arg( void ) {
 
     ULONG_PTR ret = dispatch_call( &fc );
     ASSERT_EQ( ret, 0x42 );
+
+    PASS();
+}
+
+static void test_dispatch_1arg( void ) {
+    TEST( "dispatch_call: 1-arg function doubles value" );
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) test_func_1;
+    fc.numOfArgs   = 1;
+    fc.args[0]     = 21;
+
+    ULONG_PTR ret = dispatch_call( &fc );
+    ASSERT_EQ( ret, 42 );
 
     PASS();
 }
@@ -315,13 +418,46 @@ static void test_dispatch_2arg( void ) {
     PASS();
 }
 
+static void test_dispatch_3arg( void ) {
+    TEST( "dispatch_call: 3-arg function sums arguments" );
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) test_func_3;
+    fc.numOfArgs   = 3;
+    fc.args[0]     = 10;
+    fc.args[1]     = 20;
+    fc.args[2]     = 30;
+
+    ULONG_PTR ret = dispatch_call( &fc );
+    ASSERT_EQ( ret, 60 );
+
+    PASS();
+}
+
+static void test_dispatch_10arg( void ) {
+    TEST( "dispatch_call: 10-arg (max) function sums all arguments" );
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) test_func_10;
+    fc.numOfArgs   = 10;
+    for ( int i = 0; i < 10; i++ )
+        fc.args[i] = (ULONG_PTR)( i + 1 );
+
+    ULONG_PTR ret = dispatch_call( &fc );
+    ASSERT_EQ( ret, 55 ); /* 1+2+...+10 */
+
+    PASS();
+}
+
 static void test_dispatch_null_function( void ) {
     TEST( "dispatch_call: NULL functionPtr with invalid numOfArgs returns 0" );
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
     fc.functionPtr = NULL;
-    fc.numOfArgs   = -1; /* invalid arg count, switch falls through */
+    fc.numOfArgs   = -1;
 
     ULONG_PTR ret = dispatch_call( &fc );
     ASSERT_EQ( ret, 0 );
@@ -364,11 +500,19 @@ static void test_sleep_mask_full_cycle( void ) {
 
     sleep_mask( &bi, &fc );
 
-    /* Data should be restored after full cycle */
     ASSERT_MEM_EQ( data, orig, 64 );
-
-    /* retValue should have been set by noop_func */
     ASSERT_EQ( fc.retValue, 0xBEEF );
+
+    PASS();
+}
+
+static void test_sleep_mask_null_call( void ) {
+    TEST( "sleep_mask: NULL functionCall does not crash" );
+
+    SM_BEACON_INFO bi;
+    memset( &bi, 0, sizeof( bi ) );
+
+    sleep_mask( &bi, NULL );
 
     PASS();
 }
@@ -376,10 +520,6 @@ static void test_sleep_mask_full_cycle( void ) {
 /* ================================================================== */
 /*                      BEACON GATE PATH                              */
 /* ================================================================== */
-
-static ULONG_PTR gate_test_func( void ) {
-    return 0x1337;
-}
 
 static void test_beacon_gate_path( void ) {
     TEST( "sleep_mask: beacon gate path (bMask=FALSE) executes without masking" );
@@ -405,7 +545,6 @@ static void test_beacon_gate_path( void ) {
     sleep_mask( &bi, &fc );
 
     ASSERT_EQ( fc.retValue, 0x1337 );
-    /* Data region should NOT have been modified */
     ASSERT_MEM_EQ( data, orig, 32 );
 
     PASS();
@@ -441,10 +580,7 @@ static void test_erase_mask_backup_restore( void ) {
 
     sleep_mask_erase( &bi, &fc );
 
-    /* Data should be fully restored after the erase cycle */
     ASSERT_MEM_EQ( data, orig, 128 );
-
-    /* retValue should be set */
     ASSERT_EQ( fc.retValue, 0xBEEF );
 
     free( data );
@@ -456,39 +592,72 @@ static void test_erase_mask_backup_restore( void ) {
 static void test_erase_mask_zeros_during_sleep( void ) {
     TEST( "erase mask: original memory is zeroed during the sleep call" );
 
-    /*
-     * Manually step through the erase algorithm to verify the zeroing.
-     * We replicate the first half (backup + zero) and check before restore.
-     */
     unsigned char data[64];
     fill_pattern( data, 64, "CHECKZERO" );
 
     unsigned char *backup = (unsigned char *) malloc( 64 );
     ASSERT_NOT_NULL( backup );
 
-    /* Backup */
     for ( unsigned int j = 0; j < 64; j++ )
         backup[j] = data[j];
 
-    /* Zero original */
     for ( unsigned int j = 0; j < 64; j++ )
         data[j] = 0;
 
-    /* Verify original is all zeros */
     for ( unsigned int j = 0; j < 64; j++ ) {
         ASSERT_EQ( data[j], 0 );
     }
 
-    /* Restore from backup */
     for ( unsigned int j = 0; j < 64; j++ )
         data[j] = backup[j];
 
-    /* Verify restored data matches the original pattern */
     unsigned char expected[64];
     fill_pattern( expected, 64, "CHECKZERO" );
     ASSERT_MEM_EQ( data, expected, 64 );
 
     free( backup );
+
+    PASS();
+}
+
+static void test_erase_mask_multi_region( void ) {
+    TEST( "erase mask: multi-region backup/restore cycle" );
+
+    unsigned char *r1 = (unsigned char *) malloc( 64 );
+    unsigned char *r2 = (unsigned char *) malloc( 96 );
+    unsigned char o1[64], o2[96];
+
+    ASSERT_NOT_NULL( r1 );
+    ASSERT_NOT_NULL( r2 );
+
+    fill_pattern( r1, 64, "REGION_A" );
+    fill_pattern( r2, 96, "REGION_B" );
+    memcpy( o1, r1, 64 );
+    memcpy( o2, r2, 96 );
+
+    SM_BEACON_INFO bi;
+    memset( &bi, 0, sizeof( bi ) );
+    bi.region_count       = 2;
+    bi.regions[0].base    = r1;
+    bi.regions[0].size    = 64;
+    bi.regions[0].protect = PAGE_EXECUTE_READWRITE;
+    bi.regions[1].base    = r2;
+    bi.regions[1].size    = 96;
+    bi.regions[1].protect = PAGE_READWRITE;
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) noop_func;
+    fc.numOfArgs   = 0;
+    fc.bMask       = TRUE;
+
+    sleep_mask_erase( &bi, &fc );
+
+    ASSERT_MEM_EQ( r1, o1, 64 );
+    ASSERT_MEM_EQ( r2, o2, 96 );
+
+    free( r1 );
+    free( r2 );
 
     PASS();
 }
@@ -555,7 +724,7 @@ static void test_multi_region_null_base( void ) {
     SM_BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
     bi.region_count       = 2;
-    bi.regions[0].base    = NULL; /* should be skipped */
+    bi.regions[0].base    = NULL;
     bi.regions[0].size    = 32;
     bi.regions[0].protect = PAGE_READWRITE;
     bi.regions[1].base    = data;
@@ -573,7 +742,6 @@ static void test_multi_region_null_base( void ) {
 
     sleep_mask( &bi, &fc );
 
-    /* Valid region should still be restored */
     ASSERT_MEM_EQ( data, orig, 16 );
 
     PASS();
@@ -591,7 +759,7 @@ static void test_multi_region_zero_size( void ) {
     memset( &bi, 0, sizeof( bi ) );
     bi.region_count       = 2;
     bi.regions[0].base    = data;
-    bi.regions[0].size    = 0; /* should be skipped */
+    bi.regions[0].size    = 0;
     bi.regions[0].protect = PAGE_READWRITE;
     bi.regions[1].base    = data;
     bi.regions[1].size    = 16;
@@ -608,7 +776,6 @@ static void test_multi_region_zero_size( void ) {
 
     sleep_mask( &bi, &fc );
 
-    /* Region with size 16 should be masked and restored */
     ASSERT_MEM_EQ( data, orig, 16 );
 
     PASS();
@@ -627,25 +794,209 @@ static void test_rc4_key_all_16_bytes( void ) {
         0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0x01
     };
 
-    /* Fill buffer with zeros so XOR result == key byte */
     memset( buf, 0, 32 );
 
     xor_region( buf, 32, key, 16 );
 
-    /* Bytes 0-15 should equal key[0]-key[15] */
     for ( int i = 0; i < 16; i++ ) {
         ASSERT_EQ( buf[i], key[i] );
     }
 
-    /* Bytes 16-31 should wrap: buf[16] == key[0], buf[17] == key[1], etc. */
     ASSERT_EQ( buf[0], buf[16] );
     ASSERT_EQ( buf[1], buf[17] );
     ASSERT_EQ( buf[15], buf[31] );
 
-    /* Verify each wrapped byte explicitly */
     for ( int i = 0; i < 16; i++ ) {
         ASSERT_EQ( buf[16 + i], key[i] );
     }
+
+    PASS();
+}
+
+/* ================================================================== */
+/*           PRODUCTION SLEEP MASK (NESTED STRUCT LAYOUT)             */
+/* ================================================================== */
+
+static void test_prod_mask_section_cycle( void ) {
+    TEST( "prod sleep_mask: section-level XOR encrypt/decrypt cycle" );
+
+    unsigned char data[64];
+    unsigned char orig[64];
+    fill_pattern( data, 64, "PROD_SECTION" );
+    memcpy( orig, data, 64 );
+
+    SM_BEACON_INFO_PROD bi;
+    memset( &bi, 0, sizeof( bi ) );
+
+    char mask_key[SM_MASK_SIZE_PROD] = {
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD
+    };
+    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+
+    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 64;
+    reg->Sections[0].BaseAddress  = data;
+    reg->Sections[0].VirtualSize  = 64;
+    reg->Sections[0].MaskSection  = TRUE;
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) noop_func;
+    fc.numOfArgs   = 0;
+    fc.bMask       = TRUE;
+
+    sleep_mask_prod( &bi, &fc );
+
+    ASSERT_MEM_EQ( data, orig, 64 );
+    ASSERT_EQ( fc.retValue, 0xBEEF );
+
+    PASS();
+}
+
+static void test_prod_mask_section_skip( void ) {
+    TEST( "prod sleep_mask: MaskSection=FALSE sections are not encrypted" );
+
+    unsigned char masked_data[32];
+    unsigned char unmasked_data[32];
+    unsigned char masked_orig[32];
+    unsigned char unmasked_orig[32];
+
+    fill_pattern( masked_data, 32, "MASKED" );
+    fill_pattern( unmasked_data, 32, "NOMASK" );
+    memcpy( masked_orig, masked_data, 32 );
+    memcpy( unmasked_orig, unmasked_data, 32 );
+
+    SM_BEACON_INFO_PROD bi;
+    memset( &bi, 0, sizeof( bi ) );
+
+    char mask_key[SM_MASK_SIZE_PROD] = {
+        0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9,
+        0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3
+    };
+    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+
+    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg->AllocationBase = masked_data;
+    reg->RegionSize     = 64;
+
+    reg->Sections[0].BaseAddress = masked_data;
+    reg->Sections[0].VirtualSize = 32;
+    reg->Sections[0].MaskSection = TRUE;
+
+    reg->Sections[1].BaseAddress = unmasked_data;
+    reg->Sections[1].VirtualSize = 32;
+    reg->Sections[1].MaskSection = FALSE;
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) noop_func;
+    fc.numOfArgs   = 0;
+    fc.bMask       = TRUE;
+
+    sleep_mask_prod( &bi, &fc );
+
+    /* Masked section should be restored after full cycle */
+    ASSERT_MEM_EQ( masked_data, masked_orig, 32 );
+
+    /* Unmasked section should never have been touched */
+    ASSERT_MEM_EQ( unmasked_data, unmasked_orig, 32 );
+
+    PASS();
+}
+
+static void test_prod_mask_empty_region( void ) {
+    TEST( "prod sleep_mask: NULL AllocationBase region is skipped" );
+
+    unsigned char data[16];
+    unsigned char orig[16];
+    fill_pattern( data, 16, "SAFE" );
+    memcpy( orig, data, 16 );
+
+    SM_BEACON_INFO_PROD bi;
+    memset( &bi, 0, sizeof( bi ) );
+
+    char mask_key[SM_MASK_SIZE_PROD] = { 0x42 };
+    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+
+    /* Region 0: NULL base, should be skipped */
+    bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = NULL;
+    bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 100;
+
+    /* Region 1: valid, with maskable section */
+    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 16;
+    reg->Sections[0].BaseAddress = data;
+    reg->Sections[0].VirtualSize = 16;
+    reg->Sections[0].MaskSection = TRUE;
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) noop_func;
+    fc.numOfArgs   = 0;
+    fc.bMask       = TRUE;
+
+    sleep_mask_prod( &bi, &fc );
+
+    ASSERT_MEM_EQ( data, orig, 16 );
+
+    PASS();
+}
+
+static void test_prod_mask_multi_region_multi_section( void ) {
+    TEST( "prod sleep_mask: 2 regions, multiple sections each" );
+
+    unsigned char r1s1[32], r1s2[16], r2s1[48];
+    unsigned char o1s1[32], o1s2[16], o2s1[48];
+
+    fill_pattern( r1s1, 32, "R1SEC1" );
+    fill_pattern( r1s2, 16, "R1SEC2" );
+    fill_pattern( r2s1, 48, "R2SEC1" );
+    memcpy( o1s1, r1s1, 32 );
+    memcpy( o1s2, r1s2, 16 );
+    memcpy( o2s1, r2s1, 48 );
+
+    SM_BEACON_INFO_PROD bi;
+    memset( &bi, 0, sizeof( bi ) );
+
+    char mask_key[SM_MASK_SIZE_PROD] = {
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA,
+        0xBE, 0x01, 0x23, 0x45, 0x67, 0x89
+    };
+    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+
+    /* Region 0: 2 sections */
+    SM_ALLOC_REGION_PROD *reg0 = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg0->AllocationBase = r1s1;
+    reg0->RegionSize     = 48;
+    reg0->Sections[0].BaseAddress = r1s1;
+    reg0->Sections[0].VirtualSize = 32;
+    reg0->Sections[0].MaskSection = TRUE;
+    reg0->Sections[1].BaseAddress = r1s2;
+    reg0->Sections[1].VirtualSize = 16;
+    reg0->Sections[1].MaskSection = TRUE;
+
+    /* Region 1: 1 section */
+    SM_ALLOC_REGION_PROD *reg1 = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg1->AllocationBase = r2s1;
+    reg1->RegionSize     = 48;
+    reg1->Sections[0].BaseAddress = r2s1;
+    reg1->Sections[0].VirtualSize = 48;
+    reg1->Sections[0].MaskSection = TRUE;
+
+    FUNCTION_CALL fc;
+    memset( &fc, 0, sizeof( fc ) );
+    fc.functionPtr = (PVOID) noop_func;
+    fc.numOfArgs   = 0;
+    fc.bMask       = TRUE;
+
+    sleep_mask_prod( &bi, &fc );
+
+    ASSERT_MEM_EQ( r1s1, o1s1, 32 );
+    ASSERT_MEM_EQ( r1s2, o1s2, 16 );
+    ASSERT_MEM_EQ( r2s1, o2s1, 48 );
 
     PASS();
 }
@@ -664,14 +1015,19 @@ int main( void ) {
     test_xor_16byte_key_wraps();
     test_xor_empty_buffer();
     test_xor_large_buffer();
+    test_xor_guard_bytes();
 
     /* Dispatch call */
     test_dispatch_0arg();
+    test_dispatch_1arg();
     test_dispatch_2arg();
+    test_dispatch_3arg();
+    test_dispatch_10arg();
     test_dispatch_null_function();
 
     /* Sleep mask full cycle */
     test_sleep_mask_full_cycle();
+    test_sleep_mask_null_call();
 
     /* Beacon gate path */
     test_beacon_gate_path();
@@ -679,6 +1035,7 @@ int main( void ) {
     /* Erase mask algorithm */
     test_erase_mask_backup_restore();
     test_erase_mask_zeros_during_sleep();
+    test_erase_mask_multi_region();
 
     /* Multi-region handling */
     test_multi_region_xor();
@@ -687,6 +1044,12 @@ int main( void ) {
 
     /* RC4 key usage */
     test_rc4_key_all_16_bytes();
+
+    /* Production mask (nested struct layout) */
+    test_prod_mask_section_cycle();
+    test_prod_mask_section_skip();
+    test_prod_mask_empty_region();
+    test_prod_mask_multi_region_multi_section();
 
     return TEST_SUMMARY();
 }

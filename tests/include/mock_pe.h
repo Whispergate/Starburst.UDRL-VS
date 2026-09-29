@@ -26,10 +26,10 @@ typedef int                 LONG;
 typedef int                 BOOL;
 typedef void               *PVOID, *LPVOID;
 typedef void               *HANDLE, *HMODULE, *HINSTANCE;
-typedef unsigned long       ULONG;
+typedef uint32_t            ULONG;
 typedef ULONG              *PULONG;
-typedef unsigned long long  ULONG_PTR;
-typedef unsigned int        UINT_PTR;
+typedef uint64_t            ULONG_PTR;
+typedef uintptr_t           UINT_PTR;
 typedef size_t              SIZE_T;
 typedef int               (*FARPROC)();
 typedef const char         *LPCSTR;
@@ -579,6 +579,181 @@ static inline PBYTE build_test_pe_with_relocs(DWORD *out_size) {
     /* Point data directory at the relocation block */
     nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress = reloc_rva;
     nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size = reloc->SizeOfBlock;
+
+    if (out_size) *out_size = total;
+    return buf;
+}
+
+/* ========================================================================
+ * Additional types for test compilation
+ * ====================================================================== */
+
+typedef unsigned char  *PUCHAR;
+typedef char            CHAR;
+
+#ifndef CONSTEXPR
+#define CONSTEXPR static inline
+#endif
+
+#if !defined(_MSC_VER) && !defined(__debugbreak)
+#define __debugbreak() abort()
+#endif
+
+/* ========================================================================
+ * Hash constants (from loader/include/Defs.h)
+ * ====================================================================== */
+
+#define H_MAGIC_KEY       7759
+#define H_MAGIC_SEED      6
+#define H_MODULE_NTDLL    0xc2ba439d
+#define H_MODULE_KERNEL32 0xf232005a
+
+/* ========================================================================
+ * Production sleepmask types (from mask/include/sleepmask.h)
+ * Suffixed _PROD to coexist with the simplified test versions above.
+ * ====================================================================== */
+
+#define SM_MASK_SIZE_PROD      13
+#define SM_MAX_SECTIONS_PROD   8
+#define SM_MAX_REGIONS_PROD    6
+
+typedef struct _SM_HEAP_RECORD_PROD {
+    char*    ptr;
+    size_t   size;
+} SM_HEAP_RECORD_PROD;
+
+typedef struct _SM_ALLOC_SECTION_PROD {
+    int      Label;
+    PVOID    BaseAddress;
+    SIZE_T   VirtualSize;
+    DWORD    CurrentProtect;
+    DWORD    PreviousProtect;
+    BOOL     MaskSection;
+    DWORD    DripLoadPageSize;
+} SM_ALLOC_SECTION_PROD;
+
+typedef struct _SM_ALLOC_CLEANUP_PROD {
+    BOOL     Cleanup;
+    int      AllocationMethod;
+    UINT8    AdditionalInfo[16];
+} SM_ALLOC_CLEANUP_PROD;
+
+typedef struct _SM_ALLOC_REGION_PROD {
+    int      Purpose;
+    PVOID    AllocationBase;
+    SIZE_T   RegionSize;
+    DWORD    Type;
+    DWORD    DripLoadAllocationGranularity;
+    SM_ALLOC_SECTION_PROD Sections[SM_MAX_SECTIONS_PROD];
+    SM_ALLOC_CLEANUP_PROD CleanupInformation;
+} SM_ALLOC_REGION_PROD;
+
+typedef struct _SM_ALLOC_MEMORY_PROD {
+    SM_ALLOC_REGION_PROD AllocatedMemoryRegions[SM_MAX_REGIONS_PROD];
+} SM_ALLOC_MEMORY_PROD;
+
+typedef struct _SM_BEACON_INFO_PROD {
+    unsigned int         version;
+    char*                sleep_mask_ptr;
+    DWORD                sleep_mask_text_size;
+    DWORD                sleep_mask_total_size;
+    char*                beacon_ptr;
+    SM_HEAP_RECORD_PROD* heap_records;
+    char                 mask[SM_MASK_SIZE_PROD];
+    SM_ALLOC_MEMORY_PROD allocatedMemory;
+} SM_BEACON_INFO_PROD, *PSM_BEACON_INFO_PROD;
+
+/* ========================================================================
+ * Synthetic PE with export directory (for testing LdrFunction)
+ *
+ * Layout:
+ *   0x0000  DOS header
+ *   0x0080  NT headers (3 sections: .text, .data, .edata)
+ *   0x1000  .text section (0x1000 bytes, 0xCC fill)
+ *   0x2000  .data section (0x1000 bytes, 0xAA fill)
+ *   0x3000  .edata section (export directory + tables)
+ *
+ * Exports two functions: "FuncAlpha" at RVA 0x1000, "FuncBeta" at RVA 0x1020.
+ * ====================================================================== */
+
+static inline PBYTE build_test_pe_with_exports(DWORD *out_size) {
+    DWORD total = 0x4000;
+    PBYTE buf = (PBYTE)calloc(1, total);
+    if (!buf) return NULL;
+
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)buf;
+    dos->e_magic  = IMAGE_DOS_SIGNATURE;
+    dos->e_lfanew = 0x80;
+
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(buf + 0x80);
+    nt->Signature = IMAGE_NT_SIGNATURE;
+    nt->FileHeader.Machine              = IMAGE_FILE_MACHINE_AMD64;
+    nt->FileHeader.NumberOfSections     = 3;
+    nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
+    nt->FileHeader.Characteristics      = 0x0022;
+
+    nt->OptionalHeader.Magic               = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+    nt->OptionalHeader.AddressOfEntryPoint = 0x1000;
+    nt->OptionalHeader.ImageBase           = 0x180000000ULL;
+    nt->OptionalHeader.SectionAlignment    = 0x1000;
+    nt->OptionalHeader.FileAlignment       = 0x200;
+    nt->OptionalHeader.SizeOfImage         = 0x4000;
+    nt->OptionalHeader.SizeOfHeaders       = 0x200;
+    nt->OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress = 0x3000;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size           = 0x200;
+
+    PIMAGE_SECTION_HEADER sec = IMAGE_FIRST_SECTION(nt);
+
+    memcpy(sec[0].Name, ".text\0\0\0", 8);
+    sec[0].Misc.VirtualSize = 0x1000;
+    sec[0].VirtualAddress   = 0x1000;
+    sec[0].SizeOfRawData    = 0x1000;
+    sec[0].PointerToRawData = 0x1000;
+    sec[0].Characteristics  = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ;
+
+    memcpy(sec[1].Name, ".data\0\0\0", 8);
+    sec[1].Misc.VirtualSize = 0x1000;
+    sec[1].VirtualAddress   = 0x2000;
+    sec[1].SizeOfRawData    = 0x1000;
+    sec[1].PointerToRawData = 0x2000;
+    sec[1].Characteristics  = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+
+    memcpy(sec[2].Name, ".edata\0\0", 8);
+    sec[2].Misc.VirtualSize = 0x1000;
+    sec[2].VirtualAddress   = 0x3000;
+    sec[2].SizeOfRawData    = 0x1000;
+    sec[2].PointerToRawData = 0x3000;
+    sec[2].Characteristics  = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+
+    memset(buf + 0x1000, 0xCC, 0x1000);
+    memset(buf + 0x2000, 0xAA, 0x1000);
+
+    PIMAGE_EXPORT_DIRECTORY expdir = (PIMAGE_EXPORT_DIRECTORY)(buf + 0x3000);
+    expdir->Name                  = 0x3090;
+    expdir->Base                  = 1;
+    expdir->NumberOfFunctions     = 2;
+    expdir->NumberOfNames         = 2;
+    expdir->AddressOfFunctions    = 0x3040;
+    expdir->AddressOfNames        = 0x3050;
+    expdir->AddressOfNameOrdinals = 0x3060;
+
+    PDWORD funcRvas = (PDWORD)(buf + 0x3040);
+    funcRvas[0] = 0x1000;
+    funcRvas[1] = 0x1020;
+
+    PDWORD nameRvas = (PDWORD)(buf + 0x3050);
+    nameRvas[0] = 0x3070;
+    nameRvas[1] = 0x3080;
+
+    PWORD ordinals = (PWORD)(buf + 0x3060);
+    ordinals[0] = 0;
+    ordinals[1] = 1;
+
+    memcpy(buf + 0x3070, "FuncAlpha", 10);
+    memcpy(buf + 0x3080, "FuncBeta", 9);
+    memcpy(buf + 0x3090, "testmod.dll", 12);
 
     if (out_size) *out_size = total;
     return buf;
