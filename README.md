@@ -201,22 +201,22 @@ Three test binaries:
 
 Debug tools cross-compile with MinGW for Windows. Include `debug.h` with `-DUDRL_DEBUG` to instrument your loader or mask.
 
-**`debug.h`** — drop-in instrumentation header:
+**`debug.h`** - drop-in instrumentation header:
 - `UDRL_LOG`, `UDRL_LOG_OK`, `UDRL_LOG_ERR`, `UDRL_LOG_INFO` macros
-- `udrl_hexdump()` — hex dump with ASCII column (capped at 256 bytes)
-- `udrl_validate_pe()` — checks DOS/NT signatures, logs section count and entry RVA
-- `udrl_validate_userdata()` — validates magic, load_type, regions, rc4_key
-- `udrl_log_sections()`, `udrl_log_relocs()`, `udrl_log_imports()` — trace loader operations
+- `udrl_hexdump()` - hex dump with ASCII column (capped at 256 bytes)
+- `udrl_validate_pe()` - checks DOS/NT signatures, logs section count and entry RVA
+- `udrl_validate_userdata()` - validates magic, load_type, regions, rc4_key
+- `udrl_log_sections()`, `udrl_log_relocs()`, `udrl_log_imports()` - trace loader operations
 - All compile to no-ops when `UDRL_DEBUG` is not defined
 
-**`loader_validate.c`** — post-load validation tool (7 checks):
+**`loader_validate.c`** - post-load validation tool (7 checks):
 ```bash
 x86_64-w64-mingw32-gcc -DUDRL_DEBUG -o loader_validate.exe debug/loader_validate.c
 loader_validate.exe 0x<agent_base_hex>
 ```
 Checks: UDRL_USER_DATA fields, PE header integrity, section protections (`VirtualQuery`), IAT resolution, relocations, region bounds, module stomp consistency.
 
-**`mask_validate.c`** — mask roundtrip validation tool (6 tests):
+**`mask_validate.c`** - mask roundtrip validation tool (6 tests):
 ```bash
 x86_64-w64-mingw32-gcc -DUDRL_DEBUG -o mask_validate.exe debug/mask_validate.c
 mask_validate.exe

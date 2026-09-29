@@ -10,7 +10,7 @@ debug: addflag bof
 
 addflag:
 	@echo Sleepmask: Compiling DEBUG Build
-	$(eval CFLAGS += -DDEBUG)
+	$(eval CFLAGS += -DDEBUG -DMASK_DEBUG)
 
 bof: $(PROJECT).x64.o
 

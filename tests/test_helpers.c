@@ -7,10 +7,10 @@
 #include "test.h"
 #include "mock_pe.h"
 
-#define FUNC  /* PIC marker — no-op in test builds */
+#define FUNC  /* PIC marker - no-op in test builds */
 
 /* ========================================================================
- * Functions under test — verbatim from loader/src/Main.c
+ * Functions under test - verbatim from loader/src/Main.c
  * ====================================================================== */
 
 FUNC static DWORD SectionToProtect( DWORD ch ) {
