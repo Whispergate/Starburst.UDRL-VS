@@ -3,7 +3,7 @@
 #ifdef PIC
     #include <Common.h>
 #else
-    #include <common.h>
+    #include <Shared.h>
     #define FUNC
     #define STARDUST_INSTANCE
     #define API( x ) x

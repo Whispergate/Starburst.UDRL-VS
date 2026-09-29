@@ -2,7 +2,7 @@
 #define STARDUST_COMMON_H
 
 #include <windows.h>
-#include <common.h>
+#include <Shared.h>
 #include <Ldr.h>
 #include <Defs.h>
 #include <Utils.h>
