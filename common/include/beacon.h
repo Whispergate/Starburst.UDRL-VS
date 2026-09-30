@@ -387,6 +387,7 @@ DECLSPEC_IMPORT VOID BeaconEnableBeaconGateMasking();
 */
 
 #define DLL_BEACON_USER_DATA 0x0d
+#define DLL_BEACON_START     0x0e
 #define BEACON_USER_DATA_CUSTOM_SIZE 32
 typedef struct
 {

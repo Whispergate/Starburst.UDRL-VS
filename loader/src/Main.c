@@ -142,7 +142,7 @@ FUNC VOID Main(
     // DLL_BEACON_USER_DATA - the agent copies it internally.
     //
 
-    userData.version = COBALT_STRIKE_VERSION;
+    userData.version = STARBURST_VERSION;
 
     MmCopy(userData.custom, &cData, sizeof(PVOID));
 
