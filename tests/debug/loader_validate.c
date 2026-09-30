@@ -18,34 +18,78 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* UDRL_USER_DATA definition. Uses the project header when available. */
-#ifndef UDRL_MAGIC
-#define UDRL_MAGIC              0x5442525354ULL
-#define LOAD_TYPE_VIRTUAL_ALLOC 0
-#define LOAD_TYPE_MODULE_STOMP  1
-#define MAX_UDRL_REGIONS        8
+/* CS beacon.h 4.12 types. Uses the project header when available. */
+#ifndef STARBURST_VERSION
+#define STARBURST_VERSION  0x010400
 
-typedef struct _UDRL_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} UDRL_REGION;
+typedef struct { char *ptr; size_t size; } HEAP_RECORD;
+#define MASK_SIZE 13
 
-typedef struct _UDRL_USER_DATA {
-    UINT64        magic;
-    DWORD         load_type;
-    PVOID         agent_base;
-    DWORD         agent_size;
-    PVOID         loader_base;
-    DWORD         loader_size;
-    HMODULE       stomped_module;
-    PVOID         stomped_text_base;
-    DWORD         stomped_text_size;
-    UDRL_REGION   regions[MAX_UDRL_REGIONS];
-    DWORD         region_count;
-    BYTE          rc4_key[16];
-    BYTE          reserved[64];
-} UDRL_USER_DATA;
+typedef enum {
+    PURPOSE_EMPTY, PURPOSE_GENERIC_BUFFER, PURPOSE_BEACON_MEMORY,
+    PURPOSE_SLEEPMASK_MEMORY, PURPOSE_BOF_MEMORY, PURPOSE_UDC2_MEMORY,
+    PURPOSE_USER_DEFINED_MEMORY = 1000
+} ALLOCATED_MEMORY_PURPOSE;
+
+typedef enum {
+    LABEL_EMPTY, LABEL_BUFFER, LABEL_PEHEADER, LABEL_TEXT, LABEL_RDATA,
+    LABEL_DATA, LABEL_PDATA, LABEL_RELOC, LABEL_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_LABEL;
+
+typedef enum {
+    METHOD_UNKNOWN, METHOD_VIRTUALALLOC, METHOD_HEAPALLOC,
+    METHOD_MODULESTOMP, METHOD_NTMAPVIEW, METHOD_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_ALLOCATION_METHOD;
+
+typedef struct _HEAPALLOC_INFO { PVOID HeapHandle; BOOL DestroyHeap; } HEAPALLOC_INFO;
+typedef struct _MODULESTOMP_INFO { HMODULE ModuleHandle; } MODULESTOMP_INFO;
+
+typedef union _ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION {
+    HEAPALLOC_INFO   HeapAllocInfo;
+    MODULESTOMP_INFO ModuleStompInfo;
+    PVOID            Custom;
+} ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_CLEANUP_INFORMATION {
+    BOOL Cleanup;
+    ALLOCATED_MEMORY_ALLOCATION_METHOD AllocationMethod;
+    ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION AdditionalCleanupInformation;
+} ALLOCATED_MEMORY_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_SECTION {
+    ALLOCATED_MEMORY_LABEL Label;
+    PVOID  BaseAddress;
+    SIZE_T VirtualSize;
+    DWORD  CurrentProtect;
+    DWORD  PreviousProtect;
+    BOOL   MaskSection;
+    DWORD  DripLoadPageSize;
+} ALLOCATED_MEMORY_SECTION, *PALLOCATED_MEMORY_SECTION;
+
+typedef struct _ALLOCATED_MEMORY_REGION {
+    ALLOCATED_MEMORY_PURPOSE Purpose;
+    PVOID  AllocationBase;
+    SIZE_T RegionSize;
+    DWORD  Type;
+    DWORD  DripLoadAllocationGranularity;
+    ALLOCATED_MEMORY_SECTION Sections[8];
+    ALLOCATED_MEMORY_CLEANUP_INFORMATION CleanupInformation;
+} ALLOCATED_MEMORY_REGION, *PALLOCATED_MEMORY_REGION;
+
+typedef struct {
+    ALLOCATED_MEMORY_REGION AllocatedMemoryRegions[6];
+} ALLOCATED_MEMORY, *PALLOCATED_MEMORY;
+
+#define DLL_BEACON_USER_DATA        0x0d
+#define BEACON_USER_DATA_CUSTOM_SIZE 32
+
+typedef struct {
+    unsigned int       version;
+    PVOID              syscalls;
+    char               custom[BEACON_USER_DATA_CUSTOM_SIZE];
+    PVOID              rtls;
+    PALLOCATED_MEMORY  allocatedMemory;
+} USER_DATA, *PUSER_DATA;
 #endif
 
 #define UDRL_DEBUG

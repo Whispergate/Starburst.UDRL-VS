@@ -304,24 +304,98 @@ static inline unsigned long long mock_rdtsc(void) {
 #define __rdtsc() mock_rdtsc()
 
 /* ========================================================================
- * Sleepmask types (matching sleepmask.h and beacon_gate.h)
+ * CS beacon.h 4.12 types (matching production beacon.h / sleepmask.h)
  * ====================================================================== */
 
-#define SM_MAX_REGIONS  8
+typedef struct { char *ptr; size_t size; } HEAP_RECORD;
+#define MASK_SIZE 13
 
-typedef struct _SM_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} SM_REGION;
+typedef enum {
+    PURPOSE_EMPTY,
+    PURPOSE_GENERIC_BUFFER,
+    PURPOSE_BEACON_MEMORY,
+    PURPOSE_SLEEPMASK_MEMORY,
+    PURPOSE_BOF_MEMORY,
+    PURPOSE_UDC2_MEMORY,
+    PURPOSE_USER_DEFINED_MEMORY = 1000
+} ALLOCATED_MEMORY_PURPOSE;
 
-typedef struct _SM_BEACON_INFO {
-    PVOID           beacon_base;
-    DWORD           beacon_size;
-    SM_REGION       regions[SM_MAX_REGIONS];
-    int             region_count;
-    unsigned char   rc4_key[16];
-} SM_BEACON_INFO, *PSM_BEACON_INFO;
+typedef enum {
+    LABEL_EMPTY,
+    LABEL_BUFFER,
+    LABEL_PEHEADER,
+    LABEL_TEXT,
+    LABEL_RDATA,
+    LABEL_DATA,
+    LABEL_PDATA,
+    LABEL_RELOC,
+    LABEL_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_LABEL;
+
+typedef enum {
+    METHOD_UNKNOWN,
+    METHOD_VIRTUALALLOC,
+    METHOD_HEAPALLOC,
+    METHOD_MODULESTOMP,
+    METHOD_NTMAPVIEW,
+    METHOD_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_ALLOCATION_METHOD;
+
+typedef struct _HEAPALLOC_INFO {
+    PVOID HeapHandle;
+    BOOL  DestroyHeap;
+} HEAPALLOC_INFO;
+
+typedef struct _MODULESTOMP_INFO {
+    HMODULE ModuleHandle;
+} MODULESTOMP_INFO;
+
+typedef union _ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION {
+    HEAPALLOC_INFO   HeapAllocInfo;
+    MODULESTOMP_INFO ModuleStompInfo;
+    PVOID            Custom;
+} ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_CLEANUP_INFORMATION {
+    BOOL Cleanup;
+    ALLOCATED_MEMORY_ALLOCATION_METHOD AllocationMethod;
+    ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION AdditionalCleanupInformation;
+} ALLOCATED_MEMORY_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_SECTION {
+    ALLOCATED_MEMORY_LABEL Label;
+    PVOID  BaseAddress;
+    SIZE_T VirtualSize;
+    DWORD  CurrentProtect;
+    DWORD  PreviousProtect;
+    BOOL   MaskSection;
+    DWORD  DripLoadPageSize;
+} ALLOCATED_MEMORY_SECTION, *PALLOCATED_MEMORY_SECTION;
+
+typedef struct _ALLOCATED_MEMORY_REGION {
+    ALLOCATED_MEMORY_PURPOSE Purpose;
+    PVOID  AllocationBase;
+    SIZE_T RegionSize;
+    DWORD  Type;
+    DWORD  DripLoadAllocationGranularity;
+    ALLOCATED_MEMORY_SECTION Sections[8];
+    ALLOCATED_MEMORY_CLEANUP_INFORMATION CleanupInformation;
+} ALLOCATED_MEMORY_REGION, *PALLOCATED_MEMORY_REGION;
+
+typedef struct {
+    ALLOCATED_MEMORY_REGION AllocatedMemoryRegions[6];
+} ALLOCATED_MEMORY, *PALLOCATED_MEMORY;
+
+typedef struct {
+    unsigned int     version;
+    char            *sleep_mask_ptr;
+    DWORD            sleep_mask_text_size;
+    DWORD            sleep_mask_total_size;
+    char            *beacon_ptr;
+    HEAP_RECORD     *heap_records;
+    char             mask[MASK_SIZE];
+    ALLOCATED_MEMORY allocatedMemory;
+} BEACON_INFO, *PBEACON_INFO;
 
 typedef enum _WinApi {
     INTERNETOPENA,
@@ -377,40 +451,20 @@ typedef ULONG_PTR (*BEACON_GATE_09)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, 
 typedef ULONG_PTR (*BEACON_GATE_10)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
 
 /* ========================================================================
- * UDRL_USER_DATA (matching UserData.h)
+ * CS USER_DATA (matching beacon.h 4.12 / UserData.h)
  * ====================================================================== */
 
-#define UDRL_MAGIC              0x5442525354ULL  /* "STRBT" */
-#define LOAD_TYPE_VIRTUAL_ALLOC 0
-#define LOAD_TYPE_MODULE_STOMP  1
-#define MAX_UDRL_REGIONS        8
+#define DLL_BEACON_USER_DATA        0x0d
+#define BEACON_USER_DATA_CUSTOM_SIZE 32
+#define STARBURST_VERSION           0x010400   /* 1.4.0 */
 
-typedef struct _UDRL_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} UDRL_REGION;
-
-typedef struct _UDRL_USER_DATA {
-    UINT64        magic;
-    DWORD         load_type;
-
-    PVOID         agent_base;
-    DWORD         agent_size;
-
-    PVOID         loader_base;
-    DWORD         loader_size;
-
-    HMODULE       stomped_module;
-    PVOID         stomped_text_base;
-    DWORD         stomped_text_size;
-
-    UDRL_REGION   regions[MAX_UDRL_REGIONS];
-    DWORD         region_count;
-
-    BYTE          rc4_key[16];
-    BYTE          reserved[64];
-} UDRL_USER_DATA;
+typedef struct {
+    unsigned int       version;
+    PVOID              syscalls;
+    char               custom[BEACON_USER_DATA_CUSTOM_SIZE];
+    PVOID              rtls;
+    PALLOCATED_MEMORY  allocatedMemory;
+} USER_DATA, *PUSER_DATA;
 
 /* ========================================================================
  * Utility macros (matching Stardust framework Macros.h)
@@ -608,60 +662,8 @@ typedef char            CHAR;
 #define H_MODULE_NTDLL    0xc2ba439d
 #define H_MODULE_KERNEL32 0xf232005a
 
-/* ========================================================================
- * Production sleepmask types (from mask/include/sleepmask.h)
- * Suffixed _PROD to coexist with the simplified test versions above.
- * ====================================================================== */
-
-#define SM_MASK_SIZE_PROD      13
-#define SM_MAX_SECTIONS_PROD   8
-#define SM_MAX_REGIONS_PROD    6
-
-typedef struct _SM_HEAP_RECORD_PROD {
-    char*    ptr;
-    size_t   size;
-} SM_HEAP_RECORD_PROD;
-
-typedef struct _SM_ALLOC_SECTION_PROD {
-    int      Label;
-    PVOID    BaseAddress;
-    SIZE_T   VirtualSize;
-    DWORD    CurrentProtect;
-    DWORD    PreviousProtect;
-    BOOL     MaskSection;
-    DWORD    DripLoadPageSize;
-} SM_ALLOC_SECTION_PROD;
-
-typedef struct _SM_ALLOC_CLEANUP_PROD {
-    BOOL     Cleanup;
-    int      AllocationMethod;
-    UINT8    AdditionalInfo[16];
-} SM_ALLOC_CLEANUP_PROD;
-
-typedef struct _SM_ALLOC_REGION_PROD {
-    int      Purpose;
-    PVOID    AllocationBase;
-    SIZE_T   RegionSize;
-    DWORD    Type;
-    DWORD    DripLoadAllocationGranularity;
-    SM_ALLOC_SECTION_PROD Sections[SM_MAX_SECTIONS_PROD];
-    SM_ALLOC_CLEANUP_PROD CleanupInformation;
-} SM_ALLOC_REGION_PROD;
-
-typedef struct _SM_ALLOC_MEMORY_PROD {
-    SM_ALLOC_REGION_PROD AllocatedMemoryRegions[SM_MAX_REGIONS_PROD];
-} SM_ALLOC_MEMORY_PROD;
-
-typedef struct _SM_BEACON_INFO_PROD {
-    unsigned int         version;
-    char*                sleep_mask_ptr;
-    DWORD                sleep_mask_text_size;
-    DWORD                sleep_mask_total_size;
-    char*                beacon_ptr;
-    SM_HEAP_RECORD_PROD* heap_records;
-    char                 mask[SM_MASK_SIZE_PROD];
-    SM_ALLOC_MEMORY_PROD allocatedMemory;
-} SM_BEACON_INFO_PROD, *PSM_BEACON_INFO_PROD;
+/* (Production sleepmask types are now the CS types defined above:
+ *  BEACON_INFO, ALLOCATED_MEMORY_REGION, ALLOCATED_MEMORY_SECTION, etc.) */
 
 /* ========================================================================
  * Synthetic PE with export directory (for testing LdrFunction)

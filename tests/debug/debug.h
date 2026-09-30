@@ -5,7 +5,7 @@
  * Define UDRL_DEBUG before including to activate all instrumentation.
  * All functions compile to no-ops when UDRL_DEBUG is not defined.
  *
- * Requires: windows.h, UserData.h (or define UDRL_MAGIC before including)
+ * Requires: windows.h, UserData.h (or define STARBURST_VERSION before including)
  */
 
 #ifndef _UDRL_DEBUG_H
@@ -14,8 +14,8 @@
 #include <stdio.h>
 #include <windows.h>
 
-/* Pull in UserData.h for UDRL_USER_DATA if not already defined */
-#ifndef UDRL_MAGIC
+/* Pull in UserData.h for CS USER_DATA / ALLOCATED_MEMORY if not already defined */
+#ifndef STARBURST_VERSION
 #include "UserData.h"
 #endif
 
@@ -89,43 +89,43 @@ static inline BOOL udrl_validate_pe(const char *label, PBYTE base) {
     return TRUE;
 }
 
-/* ---- UDRL_USER_DATA validation ---- */
+/* ---- CS USER_DATA + ALLOCATED_MEMORY validation ---- */
 
-static inline BOOL udrl_validate_userdata(const UDRL_USER_DATA *ud) {
+static inline BOOL udrl_validate_userdata(const USER_DATA *ud) {
     if (!ud) {
         UDRL_LOG_ERR("UserData is NULL");
         return FALSE;
     }
-    if (ud->magic != UDRL_MAGIC) {
-        UDRL_LOG_ERR("UserData bad magic: 0x%llx (expected 0x%llx)",
-            (unsigned long long)ud->magic, (unsigned long long)UDRL_MAGIC);
+    if (ud->version == 0) {
+        UDRL_LOG_ERR("UserData version is 0 (expected non-zero, e.g. 0x%x)", STARBURST_VERSION);
         return FALSE;
     }
 
-    UDRL_LOG_OK("UserData: magic=OK, load_type=%d, agent_base=%p, agent_size=0x%x",
-        (int)ud->load_type, ud->agent_base, (unsigned)ud->agent_size);
-    UDRL_LOG_INFO("  loader_base=%p, loader_size=0x%x",
-        ud->loader_base, (unsigned)ud->loader_size);
-    UDRL_LOG_INFO("  region_count=%d", (int)ud->region_count);
+    UDRL_LOG_OK("UserData: version=0x%x", ud->version);
 
-    for (DWORD i = 0; i < ud->region_count && i < MAX_UDRL_REGIONS; i++) {
-        UDRL_LOG_INFO("  region[%d]: base=%p size=0x%x protect=0x%x",
-            (int)i, ud->regions[i].base,
-            (unsigned)ud->regions[i].size,
-            (unsigned)ud->regions[i].protect);
+    if (!ud->allocatedMemory) {
+        UDRL_LOG_ERR("  allocatedMemory pointer is NULL");
+        return FALSE;
     }
 
-    /* Check rc4_key is not all zeros */
-    BOOL key_ok = FALSE;
-    for (int i = 0; i < 16; i++) {
-        if (ud->rc4_key[i] != 0) { key_ok = TRUE; break; }
-    }
-    if (!key_ok) {
-        UDRL_LOG_ERR("  rc4_key is all zeros!");
-    } else {
-        printf("[UDRL][+]   rc4_key: ");
-        for (int i = 0; i < 16; i++) printf("%02x", ud->rc4_key[i]);
-        printf("\n");
+    UDRL_LOG_INFO("  allocatedMemory=%p", (void *)ud->allocatedMemory);
+
+    for (int r = 0; r < 6; r++) {
+        const ALLOCATED_MEMORY_REGION *reg = &ud->allocatedMemory->AllocatedMemoryRegions[r];
+        if (!reg->AllocationBase || reg->RegionSize == 0)
+            continue;
+
+        UDRL_LOG_INFO("  region[%d]: purpose=%d base=%p size=0x%zx",
+            r, (int)reg->Purpose, reg->AllocationBase, reg->RegionSize);
+
+        for (int s = 0; s < 8; s++) {
+            const ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if (!sec->BaseAddress || sec->VirtualSize == 0)
+                continue;
+            UDRL_LOG_INFO("    section[%d]: label=%d base=%p vsize=0x%zx prot=0x%x mask=%d",
+                s, (int)sec->Label, sec->BaseAddress, sec->VirtualSize,
+                (unsigned)sec->CurrentProtect, (int)sec->MaskSection);
+        }
     }
 
     return TRUE;
@@ -205,7 +205,7 @@ static inline BOOL udrl_validate_pe(const char *l, PBYTE b) {
     (void)l; (void)b; return TRUE;
 }
 
-static inline BOOL udrl_validate_userdata(const UDRL_USER_DATA *u) {
+static inline BOOL udrl_validate_userdata(const USER_DATA *u) {
     (void)u; return TRUE;
 }
 

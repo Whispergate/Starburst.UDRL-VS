@@ -666,21 +666,21 @@ static void test_section_protections(void) {
 }
 
 /* ========================================================================
- * UDRL_USER_DATA population tests
+ * USER_DATA + ALLOCATED_MEMORY population tests (CS beacon.h 4.12)
  * ====================================================================== */
 
-static void test_userdata_magic(void) {
-    TEST("UDRL_USER_DATA: magic set correctly");
-    UDRL_USER_DATA ud;
+static void test_userdata_version(void) {
+    TEST("USER_DATA: version set correctly");
+    USER_DATA ud;
     MmZero(&ud, sizeof(ud));
-    ud.magic = UDRL_MAGIC;
+    ud.version = STARBURST_VERSION;
 
-    ASSERT_EQ(ud.magic, 0x5442525354ULL);
+    ASSERT_EQ(ud.version, 0x010400);
     PASS();
 }
 
 static void test_userdata_virtual_alloc(void) {
-    TEST("UDRL_USER_DATA: VirtualAlloc load type fields");
+    TEST("USER_DATA: VirtualAlloc beacon memory region");
     DWORD sz;
     PBYTE raw = build_test_pe(&sz);
     ASSERT_NOT_NULL(raw);
@@ -689,33 +689,32 @@ static void test_userdata_virtual_alloc(void) {
     PBYTE mapped = map_test_pe(raw, &nt);
     ASSERT_NOT_NULL(mapped);
 
-    UDRL_USER_DATA ud;
+    USER_DATA ud;
+    ALLOCATED_MEMORY allocMem;
     MmZero(&ud, sizeof(ud));
-    ud.magic      = UDRL_MAGIC;
-    ud.load_type  = LOAD_TYPE_VIRTUAL_ALLOC;
-    ud.agent_base = mapped;
-    ud.agent_size = nt->OptionalHeader.SizeOfImage;
+    MmZero(&allocMem, sizeof(allocMem));
 
-    ud.regions[0].base    = mapped;
-    ud.regions[0].size    = nt->OptionalHeader.SizeOfImage;
-    ud.regions[0].protect = PAGE_EXECUTE_READ;
-    ud.region_count = 1;
+    ud.version         = STARBURST_VERSION;
+    ud.allocatedMemory = &allocMem;
 
-    GenerateRc4Key(ud.rc4_key);
+    /* Region 0: Beacon memory */
+    allocMem.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+    allocMem.AllocatedMemoryRegions[0].AllocationBase = mapped;
+    allocMem.AllocatedMemoryRegions[0].RegionSize     = nt->OptionalHeader.SizeOfImage;
 
-    ASSERT_EQ(ud.magic, UDRL_MAGIC);
-    ASSERT_EQ(ud.load_type, LOAD_TYPE_VIRTUAL_ALLOC);
-    ASSERT_EQ(ud.agent_base, mapped);
-    ASSERT_EQ(ud.agent_size, 0x3000);
-    ASSERT_EQ(ud.region_count, 1);
-    ASSERT_EQ(ud.regions[0].base, mapped);
-    ASSERT_EQ(ud.regions[0].size, 0x3000);
+    allocMem.AllocatedMemoryRegions[0].Sections[0].Label       = LABEL_TEXT;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].BaseAddress = mapped;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].VirtualSize = nt->OptionalHeader.SizeOfImage;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].MaskSection = TRUE;
 
-    BOOL key_ok = FALSE;
-    for (int i = 0; i < 16; i++) {
-        if (ud.rc4_key[i] != 0) { key_ok = TRUE; break; }
-    }
-    ASSERT_TRUE(key_ok);
+    ASSERT_EQ(ud.version, STARBURST_VERSION);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].Purpose, PURPOSE_BEACON_MEMORY);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].AllocationBase, mapped);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].RegionSize, 0x3000);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].Sections[0].BaseAddress, mapped);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].Sections[0].VirtualSize, 0x3000);
+    ASSERT_TRUE(allocMem.AllocatedMemoryRegions[0].Sections[0].MaskSection);
 
     free(mapped);
     free(raw);
@@ -723,7 +722,7 @@ static void test_userdata_virtual_alloc(void) {
 }
 
 static void test_userdata_module_stomp(void) {
-    TEST("UDRL_USER_DATA: module stomp fields");
+    TEST("USER_DATA: module stomp region with cleanup info");
     DWORD sz;
     PBYTE raw = build_test_pe(&sz);
     ASSERT_NOT_NULL(raw);
@@ -732,27 +731,32 @@ static void test_userdata_module_stomp(void) {
     PBYTE mapped = map_test_pe(raw, &nt);
     ASSERT_NOT_NULL(mapped);
 
-    UDRL_USER_DATA ud;
+    USER_DATA ud;
+    ALLOCATED_MEMORY allocMem;
     MmZero(&ud, sizeof(ud));
-    ud.magic             = UDRL_MAGIC;
-    ud.load_type         = LOAD_TYPE_MODULE_STOMP;
-    ud.agent_base        = mapped;
-    ud.agent_size        = nt->OptionalHeader.SizeOfImage;
-    ud.stomped_module    = (HMODULE)mapped;
-    ud.stomped_text_base = mapped + 0x1000;
-    ud.stomped_text_size = 0x1000;
+    MmZero(&allocMem, sizeof(allocMem));
 
-    ud.regions[0].base    = mapped;
-    ud.regions[0].size    = nt->OptionalHeader.SizeOfImage;
-    ud.regions[0].protect = PAGE_EXECUTE_READ;
-    ud.region_count = 1;
+    ud.version         = STARBURST_VERSION;
+    ud.allocatedMemory = &allocMem;
 
-    GenerateRc4Key(ud.rc4_key);
+    /* Region 0: Beacon memory via module stomp */
+    allocMem.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+    allocMem.AllocatedMemoryRegions[0].AllocationBase = mapped;
+    allocMem.AllocatedMemoryRegions[0].RegionSize     = nt->OptionalHeader.SizeOfImage;
 
-    ASSERT_EQ(ud.load_type, LOAD_TYPE_MODULE_STOMP);
-    ASSERT_EQ(ud.stomped_module, (HMODULE)mapped);
-    ASSERT_EQ(ud.stomped_text_base, mapped + 0x1000);
-    ASSERT_EQ(ud.stomped_text_size, 0x1000);
+    allocMem.AllocatedMemoryRegions[0].CleanupInformation.AllocationMethod = METHOD_MODULESTOMP;
+    allocMem.AllocatedMemoryRegions[0].CleanupInformation.AdditionalCleanupInformation.ModuleStompInfo.ModuleHandle = (HMODULE)mapped;
+
+    allocMem.AllocatedMemoryRegions[0].Sections[0].Label       = LABEL_TEXT;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].BaseAddress = mapped + 0x1000;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].VirtualSize = 0x1000;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].MaskSection = TRUE;
+
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].CleanupInformation.AllocationMethod, METHOD_MODULESTOMP);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].CleanupInformation.AdditionalCleanupInformation.ModuleStompInfo.ModuleHandle, (HMODULE)mapped);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].Sections[0].BaseAddress, mapped + 0x1000);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].Sections[0].VirtualSize, 0x1000);
 
     free(mapped);
     free(raw);
@@ -931,30 +935,29 @@ static void test_full_load_cycle(void) {
             prot, &old);
     }
 
-    UDRL_USER_DATA ud;
+    USER_DATA ud;
+    ALLOCATED_MEMORY allocMem;
     MmZero(&ud, sizeof(ud));
-    ud.magic      = UDRL_MAGIC;
-    ud.load_type  = LOAD_TYPE_VIRTUAL_ALLOC;
-    ud.agent_base = mapped;
-    ud.agent_size = nt->OptionalHeader.SizeOfImage;
+    MmZero(&allocMem, sizeof(allocMem));
 
-    ud.regions[0].base    = mapped;
-    ud.regions[0].size    = nt->OptionalHeader.SizeOfImage;
-    ud.regions[0].protect = PAGE_EXECUTE_READ;
-    ud.region_count = 1;
+    ud.version         = STARBURST_VERSION;
+    ud.allocatedMemory = &allocMem;
 
-    GenerateRc4Key(ud.rc4_key);
+    /* Region 0: Beacon memory */
+    allocMem.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+    allocMem.AllocatedMemoryRegions[0].AllocationBase = mapped;
+    allocMem.AllocatedMemoryRegions[0].RegionSize     = nt->OptionalHeader.SizeOfImage;
 
-    ASSERT_EQ(ud.magic, UDRL_MAGIC);
-    ASSERT_EQ(ud.agent_base, mapped);
-    ASSERT_EQ(ud.agent_size, 0x3000);
-    ASSERT_EQ(ud.region_count, 1);
+    allocMem.AllocatedMemoryRegions[0].Sections[0].Label       = LABEL_TEXT;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].BaseAddress = mapped;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].VirtualSize = nt->OptionalHeader.SizeOfImage;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+    allocMem.AllocatedMemoryRegions[0].Sections[0].MaskSection = TRUE;
 
-    BOOL key_ok = FALSE;
-    for (int i = 0; i < 16; i++) {
-        if (ud.rc4_key[i] != 0) { key_ok = TRUE; break; }
-    }
-    ASSERT_TRUE(key_ok);
+    ASSERT_EQ(ud.version, STARBURST_VERSION);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].AllocationBase, mapped);
+    ASSERT_EQ(allocMem.AllocatedMemoryRegions[0].RegionSize, 0x3000);
+    ASSERT_TRUE(allocMem.AllocatedMemoryRegions[0].Sections[0].MaskSection);
 
     DWORD entry_rva = nt->OptionalHeader.AddressOfEntryPoint;
     PBYTE entry = mapped + entry_rva;
@@ -1005,8 +1008,8 @@ int main(void) {
     TEST_SUITE("Section Protections");
     test_section_protections();
 
-    TEST_SUITE("UDRL_USER_DATA Population");
-    test_userdata_magic();
+    TEST_SUITE("USER_DATA + ALLOCATED_MEMORY Population");
+    test_userdata_version();
     test_userdata_virtual_alloc();
     test_userdata_module_stomp();
 

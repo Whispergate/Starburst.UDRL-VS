@@ -33,8 +33,8 @@ static ULONG_PTR dispatch_call( PFUNCTION_CALL fc ) {
     return ret;
 }
 
-/* From examples/mask-xor/main.c: simplified sleep_mask (flat regions) */
-static VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
+/* From mask/src/main.c: sleep_mask using CS BEACON_INFO (section-level XOR) */
+static VOID sleep_mask( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -44,14 +44,22 @@ static VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall 
         return;
     }
 
-    unsigned char *key     = beaconInfo->rc4_key;
-    unsigned int   key_len = 16;
+    unsigned char *key     = (unsigned char *) beaconInfo->mask;
+    unsigned int   key_len = MASK_SIZE;
 
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        if ( beaconInfo->regions[i].base && beaconInfo->regions[i].size ) {
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
             xor_region(
-                (unsigned char *) beaconInfo->regions[i].base,
-                beaconInfo->regions[i].size,
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
                 key, key_len
             );
         }
@@ -59,19 +67,27 @@ static VOID sleep_mask( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall 
 
     functionCall->retValue = dispatch_call( functionCall );
 
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        if ( beaconInfo->regions[i].base && beaconInfo->regions[i].size ) {
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 )
+            continue;
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
+                continue;
+            if ( ! sec->MaskSection )
+                continue;
             xor_region(
-                (unsigned char *) beaconInfo->regions[i].base,
-                beaconInfo->regions[i].size,
+                (unsigned char *) sec->BaseAddress,
+                (unsigned int) sec->VirtualSize,
                 key, key_len
             );
         }
     }
 }
 
-/* From examples/mask-erase/main.c: erase mask */
-static VOID sleep_mask_erase( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
+/* From examples/mask-erase/main.c: erase mask (adapted for CS BEACON_INFO) */
+static VOID sleep_mask_erase( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -81,51 +97,67 @@ static VOID sleep_mask_erase( PSM_BEACON_INFO beaconInfo, PFUNCTION_CALL functio
         return;
     }
 
-    PVOID backups[SM_MAX_REGIONS] = { 0 };
+    /* Back up each maskable section, then zero it */
+    PVOID sec_backups[6 * 8] = { 0 };
     DWORD oldProtect = 0;
+    int idx = 0;
 
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        PVOID  base = beaconInfo->regions[i].base;
-        DWORD  size = beaconInfo->regions[i].size;
-
-        if ( ! base || ! size )
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 ) {
+            idx += 8;
             continue;
+        }
+        for ( int s = 0; s < 8; s++, idx++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 || ! sec->MaskSection )
+                continue;
 
-        backups[i] = mock_VirtualAlloc( NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
-        if ( ! backups[i] )
-            continue;
+            DWORD size = (DWORD) sec->VirtualSize;
+            sec_backups[idx] = mock_VirtualAlloc( NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+            if ( ! sec_backups[idx] )
+                continue;
 
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) backups[i])[j] = ((PBYTE) base)[j];
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec_backups[idx])[j] = ((PBYTE) sec->BaseAddress)[j];
 
-        mock_VirtualProtect( base, size, PAGE_READWRITE, &oldProtect );
+            mock_VirtualProtect( sec->BaseAddress, size, PAGE_READWRITE, &oldProtect );
 
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) base)[j] = 0;
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec->BaseAddress)[j] = 0;
+        }
     }
 
     functionCall->retValue = dispatch_call( functionCall );
 
-    for ( int i = 0; i < beaconInfo->region_count; i++ ) {
-        PVOID  base = beaconInfo->regions[i].base;
-        DWORD  size = beaconInfo->regions[i].size;
-
-        if ( ! base || ! size || ! backups[i] )
+    /* Restore each section from its backup */
+    idx = 0;
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+        if ( ! reg->AllocationBase || reg->RegionSize == 0 ) {
+            idx += 8;
             continue;
+        }
+        for ( int s = 0; s < 8; s++, idx++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if ( ! sec->BaseAddress || sec->VirtualSize == 0 || ! sec_backups[idx] )
+                continue;
 
-        mock_VirtualProtect( base, size, PAGE_READWRITE, &oldProtect );
+            DWORD size = (DWORD) sec->VirtualSize;
+            mock_VirtualProtect( sec->BaseAddress, size, PAGE_READWRITE, &oldProtect );
 
-        for ( DWORD j = 0; j < size; j++ )
-            ((PBYTE) base)[j] = ((PBYTE) backups[i])[j];
+            for ( DWORD j = 0; j < size; j++ )
+                ((PBYTE) sec->BaseAddress)[j] = ((PBYTE) sec_backups[idx])[j];
 
-        mock_VirtualProtect( base, size, beaconInfo->regions[i].protect, &oldProtect );
+            mock_VirtualProtect( sec->BaseAddress, size, sec->CurrentProtect, &oldProtect );
 
-        mock_VirtualFree( backups[i], 0, MEM_RELEASE );
+            mock_VirtualFree( sec_backups[idx], 0, MEM_RELEASE );
+        }
     }
 }
 
-/* From mask/src/main.c: production sleep_mask (nested region/section struct) */
-static VOID sleep_mask_prod( PSM_BEACON_INFO_PROD beaconInfo, PFUNCTION_CALL functionCall ) {
+/* From mask/src/main.c: production sleep_mask (CS BEACON_INFO, same as sleep_mask above) */
+static VOID sleep_mask_prod( PBEACON_INFO beaconInfo, PFUNCTION_CALL functionCall ) {
 
     if ( ! functionCall )
         return;
@@ -135,13 +167,13 @@ static VOID sleep_mask_prod( PSM_BEACON_INFO_PROD beaconInfo, PFUNCTION_CALL fun
         return;
     }
 
-    for ( int r = 0; r < SM_MAX_REGIONS_PROD; r++ ) {
-        SM_ALLOC_REGION_PROD *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
         if ( ! reg->AllocationBase || reg->RegionSize == 0 )
             continue;
 
-        for ( int s = 0; s < SM_MAX_SECTIONS_PROD; s++ ) {
-            SM_ALLOC_SECTION_PROD *sec = &reg->Sections[s];
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
             if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
                 continue;
             if ( ! sec->MaskSection )
@@ -151,20 +183,20 @@ static VOID sleep_mask_prod( PSM_BEACON_INFO_PROD beaconInfo, PFUNCTION_CALL fun
                 (unsigned char *) sec->BaseAddress,
                 (unsigned int) sec->VirtualSize,
                 (unsigned char *) beaconInfo->mask,
-                SM_MASK_SIZE_PROD
+                MASK_SIZE
             );
         }
     }
 
     functionCall->retValue = dispatch_call( functionCall );
 
-    for ( int r = 0; r < SM_MAX_REGIONS_PROD; r++ ) {
-        SM_ALLOC_REGION_PROD *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
+    for ( int r = 0; r < 6; r++ ) {
+        ALLOCATED_MEMORY_REGION *reg = &beaconInfo->allocatedMemory.AllocatedMemoryRegions[r];
         if ( ! reg->AllocationBase || reg->RegionSize == 0 )
             continue;
 
-        for ( int s = 0; s < SM_MAX_SECTIONS_PROD; s++ ) {
-            SM_ALLOC_SECTION_PROD *sec = &reg->Sections[s];
+        for ( int s = 0; s < 8; s++ ) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
             if ( ! sec->BaseAddress || sec->VirtualSize == 0 )
                 continue;
             if ( ! sec->MaskSection )
@@ -174,7 +206,7 @@ static VOID sleep_mask_prod( PSM_BEACON_INFO_PROD beaconInfo, PFUNCTION_CALL fun
                 (unsigned char *) sec->BaseAddress,
                 (unsigned int) sec->VirtualSize,
                 (unsigned char *) beaconInfo->mask,
-                SM_MASK_SIZE_PROD
+                MASK_SIZE
             );
         }
     }
@@ -477,20 +509,23 @@ static void test_sleep_mask_full_cycle( void ) {
     fill_pattern( data, 64, "HELLO WORLD " );
     memcpy( orig, data, 64 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.beacon_base   = data;
-    bi.beacon_size   = 64;
-    bi.region_count  = 1;
-    bi.regions[0].base    = data;
-    bi.regions[0].size    = 64;
-    bi.regions[0].protect = PAGE_EXECUTE_READWRITE;
+    bi.beacon_ptr = (char *) data;
 
-    unsigned char key[16] = {
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00
+    char mask_key[MASK_SIZE] = {
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD
     };
-    memcpy( bi.rc4_key, key, 16 );
+    memcpy( bi.mask, mask_key, MASK_SIZE );
+
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 64;
+    reg->Sections[0].BaseAddress = data;
+    reg->Sections[0].VirtualSize = 64;
+    reg->Sections[0].MaskSection = TRUE;
+    reg->Sections[0].CurrentProtect = PAGE_EXECUTE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -509,7 +544,7 @@ static void test_sleep_mask_full_cycle( void ) {
 static void test_sleep_mask_null_call( void ) {
     TEST( "sleep_mask: NULL functionCall does not crash" );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
 
     sleep_mask( &bi, NULL );
@@ -529,12 +564,15 @@ static void test_beacon_gate_path( void ) {
     fill_pattern( data, 32, "GATEDATA" );
     memcpy( orig, data, 32 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 1;
-    bi.regions[0].base    = data;
-    bi.regions[0].size    = 32;
-    bi.regions[0].protect = PAGE_READWRITE;
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 32;
+    reg->Sections[0].BaseAddress    = data;
+    reg->Sections[0].VirtualSize    = 32;
+    reg->Sections[0].MaskSection    = TRUE;
+    reg->Sections[0].CurrentProtect = PAGE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -565,12 +603,15 @@ static void test_erase_mask_backup_restore( void ) {
     fill_pattern( data, 128, "ERASEPATTERN" );
     memcpy( orig, data, 128 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 1;
-    bi.regions[0].base    = data;
-    bi.regions[0].size    = 128;
-    bi.regions[0].protect = PAGE_EXECUTE_READWRITE;
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 128;
+    reg->Sections[0].BaseAddress    = data;
+    reg->Sections[0].VirtualSize    = 128;
+    reg->Sections[0].MaskSection    = TRUE;
+    reg->Sections[0].CurrentProtect = PAGE_EXECUTE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -635,15 +676,24 @@ static void test_erase_mask_multi_region( void ) {
     memcpy( o1, r1, 64 );
     memcpy( o2, r2, 96 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 2;
-    bi.regions[0].base    = r1;
-    bi.regions[0].size    = 64;
-    bi.regions[0].protect = PAGE_EXECUTE_READWRITE;
-    bi.regions[1].base    = r2;
-    bi.regions[1].size    = 96;
-    bi.regions[1].protect = PAGE_READWRITE;
+
+    ALLOCATED_MEMORY_REGION *reg0 = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg0->AllocationBase = r1;
+    reg0->RegionSize     = 64;
+    reg0->Sections[0].BaseAddress    = r1;
+    reg0->Sections[0].VirtualSize    = 64;
+    reg0->Sections[0].MaskSection    = TRUE;
+    reg0->Sections[0].CurrentProtect = PAGE_EXECUTE_READWRITE;
+
+    ALLOCATED_MEMORY_REGION *reg1 = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg1->AllocationBase = r2;
+    reg1->RegionSize     = 96;
+    reg1->Sections[0].BaseAddress    = r2;
+    reg1->Sections[0].VirtualSize    = 96;
+    reg1->Sections[0].MaskSection    = TRUE;
+    reg1->Sections[0].CurrentProtect = PAGE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -679,24 +729,41 @@ static void test_multi_region_xor( void ) {
     memcpy( o2, r2, 48 );
     memcpy( o3, r3, 16 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 3;
-    bi.regions[0].base    = r1;
-    bi.regions[0].size    = 32;
-    bi.regions[0].protect = PAGE_READWRITE;
-    bi.regions[1].base    = r2;
-    bi.regions[1].size    = 48;
-    bi.regions[1].protect = PAGE_READWRITE;
-    bi.regions[2].base    = r3;
-    bi.regions[2].size    = 16;
-    bi.regions[2].protect = PAGE_READWRITE;
 
-    unsigned char key[16] = {
-        0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44,
-        0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0xFF, 0xEE
+    char mask_key[MASK_SIZE] = {
+        0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33,
+        0x44, 0x55, 0x66, 0x77, 0x88, 0x99
     };
-    memcpy( bi.rc4_key, key, 16 );
+    memcpy( bi.mask, mask_key, MASK_SIZE );
+
+    /* Region 0: r1 */
+    ALLOCATED_MEMORY_REGION *reg0 = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    reg0->AllocationBase = r1;
+    reg0->RegionSize     = 32;
+    reg0->Sections[0].BaseAddress    = r1;
+    reg0->Sections[0].VirtualSize    = 32;
+    reg0->Sections[0].MaskSection    = TRUE;
+    reg0->Sections[0].CurrentProtect = PAGE_READWRITE;
+
+    /* Region 1: r2 */
+    ALLOCATED_MEMORY_REGION *reg1 = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg1->AllocationBase = r2;
+    reg1->RegionSize     = 48;
+    reg1->Sections[0].BaseAddress    = r2;
+    reg1->Sections[0].VirtualSize    = 48;
+    reg1->Sections[0].MaskSection    = TRUE;
+    reg1->Sections[0].CurrentProtect = PAGE_READWRITE;
+
+    /* Region 2: r3 */
+    ALLOCATED_MEMORY_REGION *reg2 = &bi.allocatedMemory.AllocatedMemoryRegions[2];
+    reg2->AllocationBase = r3;
+    reg2->RegionSize     = 16;
+    reg2->Sections[0].BaseAddress    = r3;
+    reg2->Sections[0].VirtualSize    = 16;
+    reg2->Sections[0].MaskSection    = TRUE;
+    reg2->Sections[0].CurrentProtect = PAGE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -714,25 +781,31 @@ static void test_multi_region_xor( void ) {
 }
 
 static void test_multi_region_null_base( void ) {
-    TEST( "multi-region: NULL region base is skipped without crash" );
+    TEST( "multi-region: NULL AllocationBase region is skipped without crash" );
 
     unsigned char data[16];
     unsigned char orig[16];
     fill_pattern( data, 16, "SAFE" );
     memcpy( orig, data, 16 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 2;
-    bi.regions[0].base    = NULL;
-    bi.regions[0].size    = 32;
-    bi.regions[0].protect = PAGE_READWRITE;
-    bi.regions[1].base    = data;
-    bi.regions[1].size    = 16;
-    bi.regions[1].protect = PAGE_READWRITE;
 
-    unsigned char key[16] = { 0x42 };
-    memcpy( bi.rc4_key, key, 16 );
+    char mask_key[MASK_SIZE] = { 0x42 };
+    memcpy( bi.mask, mask_key, MASK_SIZE );
+
+    /* Region 0: NULL base, should be skipped */
+    bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = NULL;
+    bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 32;
+
+    /* Region 1: valid, with maskable section */
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 16;
+    reg->Sections[0].BaseAddress    = data;
+    reg->Sections[0].VirtualSize    = 16;
+    reg->Sections[0].MaskSection    = TRUE;
+    reg->Sections[0].CurrentProtect = PAGE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -755,18 +828,24 @@ static void test_multi_region_zero_size( void ) {
     fill_pattern( data, 16, "SKIP" );
     memcpy( orig, data, 16 );
 
-    SM_BEACON_INFO bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
-    bi.region_count       = 2;
-    bi.regions[0].base    = data;
-    bi.regions[0].size    = 0;
-    bi.regions[0].protect = PAGE_READWRITE;
-    bi.regions[1].base    = data;
-    bi.regions[1].size    = 16;
-    bi.regions[1].protect = PAGE_READWRITE;
 
-    unsigned char key[16] = { 0x42 };
-    memcpy( bi.rc4_key, key, 16 );
+    char mask_key[MASK_SIZE] = { 0x42 };
+    memcpy( bi.mask, mask_key, MASK_SIZE );
+
+    /* Region 0: zero RegionSize, should be skipped */
+    bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = data;
+    bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 0;
+
+    /* Region 1: valid, with maskable section */
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    reg->AllocationBase = data;
+    reg->RegionSize     = 16;
+    reg->Sections[0].BaseAddress    = data;
+    reg->Sections[0].VirtualSize    = 16;
+    reg->Sections[0].MaskSection    = TRUE;
+    reg->Sections[0].CurrentProtect = PAGE_READWRITE;
 
     FUNCTION_CALL fc;
     memset( &fc, 0, sizeof( fc ) );
@@ -825,16 +904,16 @@ static void test_prod_mask_section_cycle( void ) {
     fill_pattern( data, 64, "PROD_SECTION" );
     memcpy( orig, data, 64 );
 
-    SM_BEACON_INFO_PROD bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
 
-    char mask_key[SM_MASK_SIZE_PROD] = {
+    char mask_key[MASK_SIZE] = {
         0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
         0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD
     };
-    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+    memcpy( bi.mask, mask_key, MASK_SIZE );
 
-    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
     reg->AllocationBase = data;
     reg->RegionSize     = 64;
     reg->Sections[0].BaseAddress  = data;
@@ -868,16 +947,16 @@ static void test_prod_mask_section_skip( void ) {
     memcpy( masked_orig, masked_data, 32 );
     memcpy( unmasked_orig, unmasked_data, 32 );
 
-    SM_BEACON_INFO_PROD bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
 
-    char mask_key[SM_MASK_SIZE_PROD] = {
+    char mask_key[MASK_SIZE] = {
         0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9,
         0xF8, 0xF7, 0xF6, 0xF5, 0xF4, 0xF3
     };
-    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+    memcpy( bi.mask, mask_key, MASK_SIZE );
 
-    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[0];
     reg->AllocationBase = masked_data;
     reg->RegionSize     = 64;
 
@@ -914,18 +993,18 @@ static void test_prod_mask_empty_region( void ) {
     fill_pattern( data, 16, "SAFE" );
     memcpy( orig, data, 16 );
 
-    SM_BEACON_INFO_PROD bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
 
-    char mask_key[SM_MASK_SIZE_PROD] = { 0x42 };
-    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+    char mask_key[MASK_SIZE] = { 0x42 };
+    memcpy( bi.mask, mask_key, MASK_SIZE );
 
     /* Region 0: NULL base, should be skipped */
     bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = NULL;
     bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 100;
 
     /* Region 1: valid, with maskable section */
-    SM_ALLOC_REGION_PROD *reg = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    ALLOCATED_MEMORY_REGION *reg = &bi.allocatedMemory.AllocatedMemoryRegions[1];
     reg->AllocationBase = data;
     reg->RegionSize     = 16;
     reg->Sections[0].BaseAddress = data;
@@ -958,17 +1037,17 @@ static void test_prod_mask_multi_region_multi_section( void ) {
     memcpy( o1s2, r1s2, 16 );
     memcpy( o2s1, r2s1, 48 );
 
-    SM_BEACON_INFO_PROD bi;
+    BEACON_INFO bi;
     memset( &bi, 0, sizeof( bi ) );
 
-    char mask_key[SM_MASK_SIZE_PROD] = {
+    char mask_key[MASK_SIZE] = {
         0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA,
         0xBE, 0x01, 0x23, 0x45, 0x67, 0x89
     };
-    memcpy( bi.mask, mask_key, SM_MASK_SIZE_PROD );
+    memcpy( bi.mask, mask_key, MASK_SIZE );
 
     /* Region 0: 2 sections */
-    SM_ALLOC_REGION_PROD *reg0 = &bi.allocatedMemory.AllocatedMemoryRegions[0];
+    ALLOCATED_MEMORY_REGION *reg0 = &bi.allocatedMemory.AllocatedMemoryRegions[0];
     reg0->AllocationBase = r1s1;
     reg0->RegionSize     = 48;
     reg0->Sections[0].BaseAddress = r1s1;
@@ -979,7 +1058,7 @@ static void test_prod_mask_multi_region_multi_section( void ) {
     reg0->Sections[1].MaskSection = TRUE;
 
     /* Region 1: 1 section */
-    SM_ALLOC_REGION_PROD *reg1 = &bi.allocatedMemory.AllocatedMemoryRegions[1];
+    ALLOCATED_MEMORY_REGION *reg1 = &bi.allocatedMemory.AllocatedMemoryRegions[1];
     reg1->AllocationBase = r2s1;
     reg1->RegionSize     = 48;
     reg1->Sections[0].BaseAddress = r2s1;

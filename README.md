@@ -82,8 +82,8 @@ Position-independent reflective DLL loader built with the Stardust framework. Th
    - Resolves IAT via `ResolveIAT()` (ordinal + name imports, `LdrLoadDll`-based)
    - Processes relocations via `ProcessRelocations()` (DIR64 bitfield-based)
    - Sets `.text` executable via `NtProtectVirtualMemory`
-   - Populates `USER_DATA` with version, `CUSTOM_DATA` pointer, and `ALLOCATED_MEMORY` regions
-   - Three-call DllMain: `DLL_BEACON_USER_DATA` → `DLL_PROCESS_ATTACH` → `DLL_BEACON_START`
+   - Populates CS `USER_DATA` with version, `CUSTOM_DATA` pointer in `custom[32]`, and `ALLOCATED_MEMORY` regions
+   - Calls `DllMain(DLL_BEACON_USER_DATA, &userData)` then `DllMain(DLL_PROCESS_ATTACH, NULL)` to transfer execution
 
 #### Configuration (compile-time defines in `makefile`)
 
@@ -100,42 +100,41 @@ Compiled as a COFF object (`.o`) loaded by the Starburst agent at init. Called e
 - **Beacon Gate path** (`bMask = FALSE`): dispatches the queued API call directly
 - **Sleep mask path** (`bMask = TRUE`): XOR-encrypts all beacon memory regions, executes the queued sleep call, then XOR-decrypts to restore
 
-### UDRL_USER_DATA
+### USER_DATA (CS beacon.h 4.12)
 
-The `UDRL_USER_DATA` struct (defined in `loader/include/UserData.h`) bridges the loader and the agent:
+The loader uses the standard Cobalt Strike `USER_DATA` and `ALLOCATED_MEMORY` types from `beacon.h`. This allows direct compatibility with CS UDRL course code and tooling.
 
 | Field | Purpose |
 |-------|---------|
-| `magic` | `0x5442525354` ("STRBT"), validation sentinel |
 | `version` | Starburst version (`STARBURST_VERSION`, currently `0x010400` = 1.4.0) |
-| `load_type` | How the agent was loaded (VirtualAlloc / Module Stomp) |
-| `agent_base` / `agent_size` | Location of the reflectively loaded agent image |
-| `loader_base` / `loader_size` | Location of the loader shellcode allocation |
-| `stomped_module` | Handle to the sacrificial DLL (module stomp only) |
-| `stomped_text_base` / `stomped_text_size` | Stomped `.text` section location (module stomp only) |
-| `regions[]` | Up to 8 `UDRL_REGION` entries (see below) |
-| `region_count` | Number of populated entries in `regions[]` |
-| `rc4_key[16]` | RDTSC-derived key for sleep-time encryption |
+| `syscalls` | `PSYSCALL_API` — NULL (unused by Starburst) |
 | `custom[32]` | Opaque scratch space; stores a `PCUSTOM_DATA` pointer for stomp region tracking |
+| `rtls` | `PRTL_API` — NULL (unused by Starburst) |
+| `allocatedMemory` | `PALLOCATED_MEMORY` — pointer to the memory region descriptor |
 
-#### UDRL_REGION / UDRL_SECTION
+The loader passes `USER_DATA` to the agent via the CS `DLL_BEACON_USER_DATA` (0x0d) calling convention: `DllMain(hInst, DLL_BEACON_USER_DATA, &userData)` followed by `DllMain(hInst, DLL_PROCESS_ATTACH, NULL)`.
 
-Each `UDRL_REGION` describes a top-level memory allocation with up to 4 nested `UDRL_SECTION` entries for granular per-section control (mirrors CS `ALLOCATED_MEMORY_REGION` / `ALLOCATED_MEMORY_SECTION`):
+#### ALLOCATED_MEMORY_REGION / ALLOCATED_MEMORY_SECTION
+
+Each `ALLOCATED_MEMORY_REGION` describes a top-level memory allocation with up to 8 nested `ALLOCATED_MEMORY_SECTION` entries:
 
 ```
-UDRL_REGION
-├── purpose        UDRL_PURPOSE_AGENT_IMAGE / _SLEEPMASK_MEMORY / _BOF_MEMORY
-├── alloc_base     Base of the allocation
-├── region_size    Total size
-├── section_count  Number of populated sections
-└── sections[4]
-    ├── label      UDRL_LABEL_TEXT / _DATA / _RDATA / _BUFFER / _NONE
-    ├── base       Section base address
-    ├── size       Section size
-    └── protect    Current memory protection (PAGE_*)
+ALLOCATED_MEMORY_REGION
+├── Purpose           PURPOSE_BEACON_MEMORY / PURPOSE_SLEEPMASK_MEMORY / PURPOSE_BOF_MEMORY
+├── AllocationBase    Base of the allocation
+├── RegionSize        Total size
+├── CleanupInformation
+│   ├── AllocationMethod   METHOD_VIRTUALALLOC / METHOD_MODULESTOMP
+│   └── ModuleStompInfo    { ModuleHandle } (module stomp only)
+└── Sections[8]
+    ├── Label          LABEL_TEXT / LABEL_DATA / LABEL_RDATA / LABEL_BUFFER
+    ├── BaseAddress    Section base address
+    ├── VirtualSize    Section size
+    ├── CurrentProtect Current memory protection (PAGE_*)
+    └── MaskSection    TRUE if the sleep mask should encrypt this section
 ```
 
-The default loader populates 3 regions: the agent image (with `.text` and `.data` sections), sleepmask buffer, and BOF buffer. Users can add more regions/sections for finer sleep mask control.
+The default loader populates 3 regions: the agent image (with `.text` and `.data` sections), sleepmask buffer, and BOF buffer. The `ALLOCATED_MEMORY` struct holds up to 6 regions.
 
 ## Integration with Starburst Builder
 
@@ -168,7 +167,7 @@ When testing the UDRL loader standalone (outside the kit ZIP flow), the Starburs
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| `sleep_mask` | `sleepmask_vs` | **Required.** Must not be `default` — that compiles out the sleepmask-vs code path entirely. The builder maps this to `MASK_SLEEPMASK_VS`. |
+| `sleep_mask` | `sleepmask_vs` | **Required.** Must not be `default` - that compiles out the sleepmask-vs code path entirely. The builder maps this to `MASK_SLEEPMASK_VS`. |
 | `sleepmask_vs_file` | `""` (empty) | Uses the COFF already embedded in `sleepmask_vs_data.h`. Upload a `.o` file here to override. |
 | `sleepmask_vs_logging` | `false` | Set `true` for sleepmask debug output. |
 | `output_type` | `dll` | DLL output for reflective loading. |
@@ -216,7 +215,7 @@ The `examples/` directory contains drop-in replacements for the base loader and 
 
 ### loader-stomp
 
-Module-stomping reflective loader. Loads the agent DLL by stomping over a legitimate system DLL's `.text` section rather than allocating fresh executable memory. The sacrificial DLL defaults to `amsi.dll` (configurable via `STOMP_DLL`). Populates two UDRL_USER_DATA regions: the stomped `.text` and the user data allocation.
+Module-stomping reflective loader. Loads the agent DLL by stomping over a legitimate system DLL's `.text` section rather than allocating fresh executable memory. The sacrificial DLL defaults to `amsi.dll` (configurable via `STOMP_DLL`). Populates `ALLOCATED_MEMORY` regions with `METHOD_MODULESTOMP` cleanup information.
 
 **Usage:** Copy `examples/loader-stomp/Main.c` to `loader/src/Main.c`.
 
@@ -257,7 +256,7 @@ Three test binaries:
 | Binary | Tests | Coverage |
 |--------|-------|----------|
 | `test_helpers` | 18 | SectionToProtect (all 8 flag combos), FindTextSection (valid/invalid PE, multi-section), GenerateRc4Key (nonzero, byte order, uniqueness) |
-| `test_pe_ops` | 22 | PE header parsing, section mapping, DIR64 relocations, zero-delta no-op, UDRL_USER_DATA population (VirtualAlloc + module stomp), headerless variant, full load cycle |
+| `test_pe_ops` | 22 | PE header parsing, section mapping, DIR64 relocations, zero-delta no-op, USER_DATA/ALLOCATED_MEMORY population (VirtualAlloc + module stomp), headerless variant, full load cycle |
 | `test_mask_ops` | 17 | XOR roundtrip, zero-key identity, key wrapping, dispatch (0-arg, 2-arg, NULL), full sleep mask cycle, beacon gate path, erase mask, multi-region, RC4 key usage |
 
 ### Debug Tools
@@ -268,7 +267,7 @@ Debug tools cross-compile with MinGW for Windows. Include `debug.h` with `-DUDRL
 - `UDRL_LOG`, `UDRL_LOG_OK`, `UDRL_LOG_ERR`, `UDRL_LOG_INFO` macros
 - `udrl_hexdump()` - hex dump with ASCII column (capped at 256 bytes)
 - `udrl_validate_pe()` - checks DOS/NT signatures, logs section count and entry RVA
-- `udrl_validate_userdata()` - validates magic, load_type, regions, rc4_key
+- `udrl_validate_userdata()` - validates USER_DATA version, allocatedMemory, regions
 - `udrl_log_sections()`, `udrl_log_relocs()`, `udrl_log_imports()` - trace loader operations
 - All compile to no-ops when `UDRL_DEBUG` is not defined
 
@@ -277,7 +276,7 @@ Debug tools cross-compile with MinGW for Windows. Include `debug.h` with `-DUDRL
 x86_64-w64-mingw32-gcc -DUDRL_DEBUG -o loader_validate.exe debug/loader_validate.c
 loader_validate.exe 0x<agent_base_hex>
 ```
-Checks: UDRL_USER_DATA fields, PE header integrity, section protections (`VirtualQuery`), IAT resolution, relocations, region bounds, module stomp consistency.
+Checks: USER_DATA/ALLOCATED_MEMORY fields, PE header integrity, section protections (`VirtualQuery`), IAT resolution, relocations, region bounds, module stomp consistency.
 
 **`mask_validate.c`** - mask roundtrip validation tool (6 tests):
 ```bash
