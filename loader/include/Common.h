@@ -2,10 +2,17 @@
 #define STARDUST_COMMON_H
 
 #include <windows.h>
+#include <stdio.h>
+
+#include <Native.h>
+#include <Macros.h>
 #include <Shared.h>
 #include <Ldr.h>
 #include <Defs.h>
 #include <Utils.h>
+
+#define _DECL_DLLMAIN
+#include <process.h>
 
 EXTERN_C ULONG __Instance_offset;
 EXTERN_C PVOID __Instance;
@@ -20,6 +27,8 @@ typedef struct _INSTANCE {
         API_LIST
         #undef API_ENTRY
 
+        // Beacon Entry Point
+        D_API( DllMain )
     } Win32;
 
     struct {
@@ -30,6 +39,8 @@ typedef struct _INSTANCE {
         DLL_LIST
         #undef DLL_ENTRY
     } Modules;
+
+    PCUSTOM_DATA cData;
 
 } INSTANCE, *PINSTANCE;
 

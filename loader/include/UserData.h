@@ -15,19 +15,46 @@
 
 #define UDRL_MAGIC  0x5442525354ULL   /* "STRBT" */
 
+#define STARBURST_VERSION  0x010400   /* 1.4.0  (0xMMmmPP like CS convention) */
+
 #define LOAD_TYPE_VIRTUAL_ALLOC   0
 #define LOAD_TYPE_MODULE_STOMP    1
 
-typedef struct _UDRL_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} UDRL_REGION;
+#define UDRL_CUSTOM_SIZE  32
 
-#define MAX_UDRL_REGIONS  8
+/* Region purpose constants (mirrors CS PURPOSE_* from beacon.h) */
+#define UDRL_PURPOSE_AGENT_IMAGE        0
+#define UDRL_PURPOSE_SLEEPMASK_MEMORY   1
+#define UDRL_PURPOSE_BOF_MEMORY         2
+
+/* Section label constants (mirrors CS LABEL_* from beacon.h) */
+#define UDRL_LABEL_NONE       0
+#define UDRL_LABEL_BUFFER     1
+#define UDRL_LABEL_TEXT       2
+#define UDRL_LABEL_RDATA      3
+#define UDRL_LABEL_DATA       4
+
+#define MAX_UDRL_SECTIONS  4
+#define MAX_UDRL_REGIONS   8
+
+typedef struct _UDRL_SECTION {
+    DWORD   label;
+    PVOID   base;
+    SIZE_T  size;
+    DWORD   protect;
+} UDRL_SECTION;
+
+typedef struct _UDRL_REGION {
+    DWORD         purpose;
+    PVOID         alloc_base;
+    SIZE_T        region_size;
+    UDRL_SECTION  sections[MAX_UDRL_SECTIONS];
+    DWORD         section_count;
+} UDRL_REGION;
 
 typedef struct _UDRL_USER_DATA {
     UINT64        magic;
+    DWORD         version;
     DWORD         load_type;
 
     PVOID         agent_base;
@@ -44,7 +71,7 @@ typedef struct _UDRL_USER_DATA {
     DWORD         region_count;
 
     BYTE          rc4_key[16];
-    BYTE          reserved[64];
+    char          custom[UDRL_CUSTOM_SIZE];
 } UDRL_USER_DATA;
 
 #endif

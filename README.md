@@ -77,10 +77,13 @@ Position-independent reflective DLL loader built with the Stardust framework. Th
 2. **`PreMain.c`**: resolves ntdll from PEB, allocates heap for the `INSTANCE` struct, patches the global pointer
 3. **`Main.c`**: the reflective loader:
    - Resolves kernel32 + ntdll APIs via PEB walking + custom hashing
-   - Locates the embedded DLL payload (appended after the loader shellcode)
-   - Parses PE headers, maps sections, processes relocations, resolves IAT
-   - Allocates and populates `UDRL_USER_DATA` for the sleep mask
-   - Calls `DllMain(DLL_PROCESS_ATTACH, &user_data)`
+   - Allocates `CUSTOM_DATA` for stomp region tracking (beacon + sleepmask + BOF)
+   - Parses PE headers, maps sections into a single contiguous allocation
+   - Resolves IAT via `ResolveIAT()` (ordinal + name imports, `LdrLoadDll`-based)
+   - Processes relocations via `ProcessRelocations()` (DIR64 bitfield-based)
+   - Sets `.text` executable via `NtProtectVirtualMemory`
+   - Populates `USER_DATA` with version, `CUSTOM_DATA` pointer, and `ALLOCATED_MEMORY` regions
+   - Three-call DllMain: `DLL_BEACON_USER_DATA` → `DLL_PROCESS_ATTACH` → `DLL_BEACON_START`
 
 #### Configuration (compile-time defines in `makefile`)
 
@@ -104,11 +107,35 @@ The `UDRL_USER_DATA` struct (defined in `loader/include/UserData.h`) bridges the
 | Field | Purpose |
 |-------|---------|
 | `magic` | `0x5442525354` ("STRBT"), validation sentinel |
+| `version` | Starburst version (`STARBURST_VERSION`, currently `0x010400` = 1.4.0) |
 | `load_type` | How the agent was loaded (VirtualAlloc / Module Stomp) |
 | `agent_base` / `agent_size` | Location of the reflectively loaded agent image |
+| `loader_base` / `loader_size` | Location of the loader shellcode allocation |
 | `stomped_module` | Handle to the sacrificial DLL (module stomp only) |
-| `regions[]` | Up to 8 memory regions for the sleep mask to encrypt |
+| `stomped_text_base` / `stomped_text_size` | Stomped `.text` section location (module stomp only) |
+| `regions[]` | Up to 8 `UDRL_REGION` entries (see below) |
+| `region_count` | Number of populated entries in `regions[]` |
 | `rc4_key[16]` | RDTSC-derived key for sleep-time encryption |
+| `custom[32]` | Opaque scratch space; stores a `PCUSTOM_DATA` pointer for stomp region tracking |
+
+#### UDRL_REGION / UDRL_SECTION
+
+Each `UDRL_REGION` describes a top-level memory allocation with up to 4 nested `UDRL_SECTION` entries for granular per-section control (mirrors CS `ALLOCATED_MEMORY_REGION` / `ALLOCATED_MEMORY_SECTION`):
+
+```
+UDRL_REGION
+├── purpose        UDRL_PURPOSE_AGENT_IMAGE / _SLEEPMASK_MEMORY / _BOF_MEMORY
+├── alloc_base     Base of the allocation
+├── region_size    Total size
+├── section_count  Number of populated sections
+└── sections[4]
+    ├── label      UDRL_LABEL_TEXT / _DATA / _RDATA / _BUFFER / _NONE
+    ├── base       Section base address
+    ├── size       Section size
+    └── protect    Current memory protection (PAGE_*)
+```
+
+The default loader populates 3 regions: the agent image (with `.text` and `.data` sections), sleepmask buffer, and BOF buffer. Users can add more regions/sections for finer sleep mask control.
 
 ## Integration with Starburst Builder
 
@@ -144,8 +171,10 @@ Use `HASH_STR()` from `Constexpr.h` for compile-time hashes:
 
 ### Adding New APIs
 
-1. Add `D_API( FunctionName )` to the `INSTANCE` struct in `Common.h`
-2. Resolve it in `Main.c` with `LdrFunction( module, HASH_STR("FunctionName") )`
+1. Add `API_ENTRY( FunctionName, ModuleName )` to `API_LIST` in `common/include/Shared.h`
+2. If the module isn't `Ntdll` or `Kernel32`, add `DLL_ENTRY( ModuleName )` to `DLL_LIST`
+3. The X-macro pattern auto-generates the `INSTANCE` struct fields and resolution in `ResolveApis()`
+4. Use `API( FunctionName )` to call it anywhere with `STARDUST_INSTANCE` in scope
 
 ## Examples
 
