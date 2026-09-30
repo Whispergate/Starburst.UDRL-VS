@@ -15,7 +15,7 @@ Starburst.UDRL-VS/
 │   ├── include/
 │   │   ├── test.h              Minimal test assertion framework
 │   │   └── mock_pe.h           PE structures + Win32 mocks for Linux
-│   ├── test_helpers.c          SectionToProtect, FindTextSection, GenerateRc4Key
+│   ├── test_helpers.c          HashString, ExprHashStringA, SectionToProtect, FindTextSection, GenerateRc4Key
 │   ├── test_pe_ops.c           PE parsing, mapping, relocs, userdata
 │   ├── test_mask_ops.c         XOR, dispatch, full cycle, erase, multi-region
 │   └── debug/
@@ -247,7 +247,7 @@ Tests compile natively on Linux with `gcc`. They use `mock_pe.h` to provide PE s
 
 ```bash
 cd tests
-make test    # compile and run all 57 tests
+make test    # compile and run all 85 tests
 make clean   # remove binaries
 ```
 
@@ -255,9 +255,9 @@ Three test binaries:
 
 | Binary | Tests | Coverage |
 |--------|-------|----------|
-| `test_helpers` | 18 | SectionToProtect (all 8 flag combos), FindTextSection (valid/invalid PE, multi-section), GenerateRc4Key (nonzero, byte order, uniqueness) |
-| `test_pe_ops` | 22 | PE header parsing, section mapping, DIR64 relocations, zero-delta no-op, USER_DATA/ALLOCATED_MEMORY population (VirtualAlloc + module stomp), headerless variant, full load cycle |
-| `test_mask_ops` | 17 | XOR roundtrip, zero-key identity, key wrapping, dispatch (0-arg, 2-arg, NULL), full sleep mask cycle, beacon gate path, erase mask, multi-region, RC4 key usage |
+| `test_helpers` | 28 | HashString (NULL, empty, case-insensitive, collision, manual), ExprHashStringA (NULL, narrow match, case), SectionToProtect (all 8 flag combos + non-memory), FindTextSection (valid/invalid PE, multi-section), GenerateRc4Key (nonzero, byte order, uniqueness) |
+| `test_pe_ops` | 30 | LdrpImageHeader (valid/invalid DOS/NT), LdrFunction (resolve, unknown, NULL), PE header parsing, section mapping, DIR64 relocations, zero-delta no-op, section protections, USER_DATA/ALLOCATED_MEMORY population (VirtualAlloc + module stomp), headerless variant, full load cycle |
+| `test_mask_ops` | 27 | XOR roundtrip, zero-key identity, key wrapping, bounds check, dispatch (0-arg through 10-arg, NULL), full sleep mask cycle, beacon gate path, erase mask, multi-region, section-level XOR, MaskSection=FALSE skip, RC4 key usage |
 
 ### Debug Tools
 

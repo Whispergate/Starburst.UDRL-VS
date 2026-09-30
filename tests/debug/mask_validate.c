@@ -2,7 +2,7 @@
  * UDRL Mask Roundtrip Validation Tool
  *
  * Validates that a sleep mask implementation correctly encrypts and decrypts
- * beacon memory regions without corruption or overflow.
+ * beacon memory sections (CS BEACON_INFO) without corruption or overflow.
  *
  * Build (MinGW):
  *   x86_64-w64-mingw32-gcc -DUDRL_DEBUG -o mask_validate.exe mask_validate.c
@@ -19,24 +19,86 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* SM_BEACON_INFO / SM_REGION / FUNCTION_CALL definitions.
+/* CS beacon.h 4.12 types: BEACON_INFO / ALLOCATED_MEMORY / FUNCTION_CALL.
  * Uses the project headers when available. */
-#ifndef SM_MAX_REGIONS
-#define SM_MAX_REGIONS  8
+#ifndef STARBURST_VERSION
+#define STARBURST_VERSION  0x010400
 
-typedef struct _SM_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} SM_REGION;
+typedef struct { char *ptr; size_t size; } HEAP_RECORD;
+#define MASK_SIZE 13
 
-typedef struct _SM_BEACON_INFO {
-    PVOID           beacon_base;
-    DWORD           beacon_size;
-    SM_REGION       regions[SM_MAX_REGIONS];
-    int             region_count;
-    unsigned char   rc4_key[16];
-} SM_BEACON_INFO, *PSM_BEACON_INFO;
+typedef enum {
+    PURPOSE_EMPTY, PURPOSE_GENERIC_BUFFER, PURPOSE_BEACON_MEMORY,
+    PURPOSE_SLEEPMASK_MEMORY, PURPOSE_BOF_MEMORY, PURPOSE_UDC2_MEMORY,
+    PURPOSE_USER_DEFINED_MEMORY = 1000
+} ALLOCATED_MEMORY_PURPOSE;
+
+typedef enum {
+    LABEL_EMPTY, LABEL_BUFFER, LABEL_PEHEADER, LABEL_TEXT, LABEL_RDATA,
+    LABEL_DATA, LABEL_PDATA, LABEL_RELOC, LABEL_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_LABEL;
+
+typedef enum {
+    METHOD_UNKNOWN, METHOD_VIRTUALALLOC, METHOD_HEAPALLOC,
+    METHOD_MODULESTOMP, METHOD_NTMAPVIEW, METHOD_USER_DEFINED = 1000
+} ALLOCATED_MEMORY_ALLOCATION_METHOD;
+
+typedef struct _HEAPALLOC_INFO { PVOID HeapHandle; BOOL DestroyHeap; } HEAPALLOC_INFO;
+typedef struct _MODULESTOMP_INFO { HMODULE ModuleHandle; } MODULESTOMP_INFO;
+
+typedef union _ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION {
+    HEAPALLOC_INFO   HeapAllocInfo;
+    MODULESTOMP_INFO ModuleStompInfo;
+    PVOID            Custom;
+} ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_CLEANUP_INFORMATION {
+    BOOL Cleanup;
+    ALLOCATED_MEMORY_ALLOCATION_METHOD AllocationMethod;
+    ALLOCATED_MEMORY_ADDITIONAL_CLEANUP_INFORMATION AdditionalCleanupInformation;
+} ALLOCATED_MEMORY_CLEANUP_INFORMATION;
+
+typedef struct _ALLOCATED_MEMORY_SECTION {
+    ALLOCATED_MEMORY_LABEL Label;
+    PVOID  BaseAddress;
+    SIZE_T VirtualSize;
+    DWORD  CurrentProtect;
+    DWORD  PreviousProtect;
+    BOOL   MaskSection;
+    DWORD  DripLoadPageSize;
+} ALLOCATED_MEMORY_SECTION, *PALLOCATED_MEMORY_SECTION;
+
+typedef struct _ALLOCATED_MEMORY_REGION {
+    ALLOCATED_MEMORY_PURPOSE Purpose;
+    PVOID  AllocationBase;
+    SIZE_T RegionSize;
+    DWORD  Type;
+    DWORD  DripLoadAllocationGranularity;
+    ALLOCATED_MEMORY_SECTION Sections[8];
+    ALLOCATED_MEMORY_CLEANUP_INFORMATION CleanupInformation;
+} ALLOCATED_MEMORY_REGION, *PALLOCATED_MEMORY_REGION;
+
+typedef struct {
+    ALLOCATED_MEMORY_REGION AllocatedMemoryRegions[6];
+} ALLOCATED_MEMORY, *PALLOCATED_MEMORY;
+
+typedef struct {
+    ALLOCATED_MEMORY allocatedMemory;
+    unsigned char    mask[MASK_SIZE];
+    HEAP_RECORD     *heap_records;
+    int              num_heap_records;
+} BEACON_INFO, *PBEACON_INFO;
+
+#define DLL_BEACON_USER_DATA        0x0d
+#define BEACON_USER_DATA_CUSTOM_SIZE 32
+
+typedef struct {
+    unsigned int       version;
+    PVOID              syscalls;
+    char               custom[BEACON_USER_DATA_CUSTOM_SIZE];
+    PVOID              rtls;
+    PALLOCATED_MEMORY  allocatedMemory;
+} USER_DATA, *PUSER_DATA;
 #endif
 
 #ifndef MAX_BEACON_GATE_ARGUMENTS
@@ -66,37 +128,6 @@ typedef struct {
 } FUNCTION_CALL, *PFUNCTION_CALL;
 #endif
 
-/* Provide a minimal UDRL_USER_DATA stub so debug.h compiles.
- * The mask validator only uses SM_BEACON_INFO, not UDRL_USER_DATA. */
-#ifndef UDRL_MAGIC
-#define UDRL_MAGIC              0x5442525354ULL
-#define LOAD_TYPE_VIRTUAL_ALLOC 0
-#define LOAD_TYPE_MODULE_STOMP  1
-#define MAX_UDRL_REGIONS        8
-
-typedef struct _UDRL_REGION {
-    PVOID  base;
-    DWORD  size;
-    DWORD  protect;
-} UDRL_REGION;
-
-typedef struct _UDRL_USER_DATA {
-    UINT64        magic;
-    DWORD         load_type;
-    PVOID         agent_base;
-    DWORD         agent_size;
-    PVOID         loader_base;
-    DWORD         loader_size;
-    HMODULE       stomped_module;
-    PVOID         stomped_text_base;
-    DWORD         stomped_text_size;
-    UDRL_REGION   regions[MAX_UDRL_REGIONS];
-    DWORD         region_count;
-    BYTE          rc4_key[16];
-    BYTE          reserved[64];
-} UDRL_USER_DATA;
-#endif
-
 #define UDRL_DEBUG
 #include "debug.h"
 
@@ -105,7 +136,7 @@ typedef struct _UDRL_USER_DATA {
 #define GUARD_SIZE  32
 
 /* Mask function signature matching sleep_mask() */
-typedef void (*MASK_FUNC)(PSM_BEACON_INFO, PFUNCTION_CALL);
+typedef void (*MASK_FUNC)(PBEACON_INFO, PFUNCTION_CALL);
 
 /* No-op sleep function for the FUNCTION_CALL dispatch */
 static ULONG_PTR __stdcall noop_sleep(ULONG_PTR handle, ULONG_PTR ms) {
@@ -168,26 +199,32 @@ static void setup_mask_call(FUNCTION_CALL *fc) {
     fc->bMask       = TRUE;
 }
 
-/* Set up SM_BEACON_INFO with the given test key */
-static void setup_beacon_info(SM_BEACON_INFO *bi, unsigned char *key) {
+/* Set up BEACON_INFO with the given mask key */
+static void setup_beacon_info(BEACON_INFO *bi, unsigned char *key, unsigned int key_len) {
     memset(bi, 0, sizeof(*bi));
-    memcpy(bi->rc4_key, key, 16);
+    unsigned int copy_len = key_len < MASK_SIZE ? key_len : MASK_SIZE;
+    memcpy(bi->mask, key, copy_len);
 }
 
 /*
  * Run a single roundtrip test:
- *   1. Save original buffer contents
+ *   1. Save original buffer contents for all maskable sections
  *   2. Call mask with bMask=TRUE (mask encrypts, executes sleep, then decrypts)
  *   3. Compare buffer to original
  *   4. Check guard bytes
+ *
+ * originals/sizes/count: parallel arrays of saved data for each maskable section.
+ * sec_bufs: the actual section BaseAddress pointers (for guard check).
  */
 static int run_roundtrip(const char *name, MASK_FUNC mask_fn,
-                         SM_BEACON_INFO *bi, BYTE **originals) {
+                         BEACON_INFO *bi,
+                         BYTE **originals, DWORD *sizes, BYTE **sec_bufs,
+                         int sec_count) {
     int fail = 0;
 
-    /* Save copies of all region data */
-    for (int i = 0; i < bi->region_count; i++) {
-        memcpy(originals[i], bi->regions[i].base, bi->regions[i].size);
+    /* Save copies of all maskable section data */
+    for (int i = 0; i < sec_count; i++) {
+        memcpy(originals[i], sec_bufs[i], sizes[i]);
     }
 
     /* Call the mask (encrypt, sleep, decrypt) */
@@ -196,12 +233,11 @@ static int run_roundtrip(const char *name, MASK_FUNC mask_fn,
     mask_fn(bi, &fc);
 
     /* Verify roundtrip: data should match original */
-    for (int i = 0; i < bi->region_count; i++) {
-        if (memcmp(bi->regions[i].base, originals[i], bi->regions[i].size) != 0) {
-            UDRL_LOG_ERR("%s: region[%d] data corrupted after roundtrip", name, i);
-            /* Show first mismatch */
-            BYTE *cur = (BYTE *)bi->regions[i].base;
-            for (DWORD j = 0; j < bi->regions[i].size; j++) {
+    for (int i = 0; i < sec_count; i++) {
+        if (memcmp(sec_bufs[i], originals[i], sizes[i]) != 0) {
+            UDRL_LOG_ERR("%s: section[%d] data corrupted after roundtrip", name, i);
+            BYTE *cur = sec_bufs[i];
+            for (DWORD j = 0; j < sizes[i]; j++) {
                 if (cur[j] != originals[i][j]) {
                     UDRL_LOG_ERR("  first mismatch at offset %d: got 0x%02x, expected 0x%02x",
                         (int)j, cur[j], originals[i][j]);
@@ -210,13 +246,13 @@ static int run_roundtrip(const char *name, MASK_FUNC mask_fn,
             }
             fail++;
         } else {
-            UDRL_LOG_OK("%s: region[%d] (%d bytes) roundtrip OK", name, i, bi->regions[i].size);
+            UDRL_LOG_OK("%s: section[%d] (%d bytes) roundtrip OK", name, i, (int)sizes[i]);
         }
 
         /* Check guard bytes */
         char label[128];
-        snprintf(label, sizeof(label), "%s region[%d]", name, i);
-        if (!check_guards(label, (BYTE *)bi->regions[i].base, bi->regions[i].size)) {
+        snprintf(label, sizeof(label), "%s section[%d]", name, i);
+        if (!check_guards(label, sec_bufs[i], sizes[i])) {
             fail++;
         }
     }
@@ -235,15 +271,15 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
     int fail = 0;
     int test_num = 0;
 
-    /* Test key (non-zero, known pattern) */
-    unsigned char key[16] = {
+    /* Test key (non-zero, known pattern, MASK_SIZE bytes) */
+    unsigned char key[MASK_SIZE] = {
         0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF
+        0x01, 0x23, 0x45, 0x67, 0x89
     };
 
     UDRL_LOG_INFO("=== UDRL Mask Roundtrip Validation ===");
 
-    /* ---- Test 1: Small buffer (16 bytes) ---- */
+    /* ---- Test 1: Small buffer (16 bytes), one region one section ---- */
     {
         test_num++;
         const char *name = "Test 1: 16-byte buffer";
@@ -252,19 +288,23 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         BYTE *buf = alloc_guarded(16);
         BYTE orig[16];
         BYTE *originals[1] = { orig };
+        BYTE *sec_bufs[1]  = { buf };
+        DWORD sizes[1]     = { 16 };
 
         fill_pattern(buf, 16);
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = buf;
-        bi.beacon_size  = 16;
-        bi.regions[0].base    = buf;
-        bi.regions[0].size    = 16;
-        bi.regions[0].protect = PAGE_EXECUTE_READ;
-        bi.region_count = 1;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 16;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress    = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize    = 16;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-        int f = run_roundtrip(name, mask_fn, &bi, originals);
+        int f = run_roundtrip(name, mask_fn, &bi, originals, sizes, sec_bufs, 1);
         fail += f;
         if (f == 0) pass++;
 
@@ -280,19 +320,23 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         BYTE *buf = alloc_guarded(4096);
         BYTE *orig = (BYTE *)malloc(4096);
         BYTE *originals[1] = { orig };
+        BYTE *sec_bufs[1]  = { buf };
+        DWORD sizes[1]     = { 4096 };
 
         fill_pattern(buf, 4096);
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = buf;
-        bi.beacon_size  = 4096;
-        bi.regions[0].base    = buf;
-        bi.regions[0].size    = 4096;
-        bi.regions[0].protect = PAGE_EXECUTE_READ;
-        bi.region_count = 1;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 4096;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress    = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize    = 4096;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-        int f = run_roundtrip(name, mask_fn, &bi, originals);
+        int f = run_roundtrip(name, mask_fn, &bi, originals, sizes, sec_bufs, 1);
         fail += f;
         if (f == 0) pass++;
 
@@ -300,7 +344,7 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         free_guarded(buf);
     }
 
-    /* ---- Test 3: Multiple regions (3 regions of different sizes) ---- */
+    /* ---- Test 3: Multiple regions (3 regions, each with one section) ---- */
     {
         test_num++;
         const char *name = "Test 3: 3 regions";
@@ -316,19 +360,21 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
             fill_pattern(bufs[i], sizes[i]);
         }
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = bufs[0];
-        bi.beacon_size  = sizes[0];
-        bi.region_count = 3;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
 
         for (int i = 0; i < 3; i++) {
-            bi.regions[i].base    = bufs[i];
-            bi.regions[i].size    = sizes[i];
-            bi.regions[i].protect = PAGE_EXECUTE_READ;
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Purpose       = PURPOSE_BEACON_MEMORY;
+            bi.allocatedMemory.AllocatedMemoryRegions[i].AllocationBase = bufs[i];
+            bi.allocatedMemory.AllocatedMemoryRegions[i].RegionSize     = sizes[i];
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Sections[0].Label          = LABEL_TEXT;
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Sections[0].BaseAddress    = bufs[i];
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Sections[0].VirtualSize    = sizes[i];
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+            bi.allocatedMemory.AllocatedMemoryRegions[i].Sections[0].MaskSection    = TRUE;
         }
 
-        int f = run_roundtrip(name, mask_fn, &bi, origs);
+        int f = run_roundtrip(name, mask_fn, &bi, origs, sizes, bufs, 3);
         fail += f;
         if (f == 0) pass++;
 
@@ -347,19 +393,23 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         BYTE *buf = alloc_guarded(256);
         BYTE *orig = (BYTE *)malloc(256);
         BYTE *originals[1] = { orig };
+        BYTE *sec_bufs[1]  = { buf };
+        DWORD sizes[1]     = { 256 };
 
         memset(buf, 0x00, 256);
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = buf;
-        bi.beacon_size  = 256;
-        bi.regions[0].base    = buf;
-        bi.regions[0].size    = 256;
-        bi.regions[0].protect = PAGE_EXECUTE_READ;
-        bi.region_count = 1;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 256;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress    = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize    = 256;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-        int f = run_roundtrip(name, mask_fn, &bi, originals);
+        int f = run_roundtrip(name, mask_fn, &bi, originals, sizes, sec_bufs, 1);
         fail += f;
         if (f == 0) pass++;
 
@@ -376,19 +426,23 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         BYTE *buf = alloc_guarded(256);
         BYTE *orig = (BYTE *)malloc(256);
         BYTE *originals[1] = { orig };
+        BYTE *sec_bufs[1]  = { buf };
+        DWORD sizes[1]     = { 256 };
 
         memset(buf, 0xFF, 256);
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = buf;
-        bi.beacon_size  = 256;
-        bi.regions[0].base    = buf;
-        bi.regions[0].size    = 256;
-        bi.regions[0].protect = PAGE_EXECUTE_READ;
-        bi.region_count = 1;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 256;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress    = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize    = 256;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-        int f = run_roundtrip(name, mask_fn, &bi, originals);
+        int f = run_roundtrip(name, mask_fn, &bi, originals, sizes, sec_bufs, 1);
         fail += f;
         if (f == 0) pass++;
 
@@ -402,23 +456,27 @@ int udrl_mask_validate(MASK_FUNC mask_fn) {
         const char *name = "Test 6: guard byte integrity";
         UDRL_LOG_INFO("--- %s ---", name);
 
-        /* This test uses a 1-byte region, which stresses alignment edge cases */
+        /* This test uses a 1-byte section, which stresses alignment edge cases */
         BYTE *buf = alloc_guarded(1);
         BYTE orig[1];
         BYTE *originals[1] = { orig };
+        BYTE *sec_bufs[1]  = { buf };
+        DWORD sizes[1]     = { 1 };
 
         buf[0] = 0x42;
 
-        SM_BEACON_INFO bi;
-        setup_beacon_info(&bi, key);
-        bi.beacon_base  = buf;
-        bi.beacon_size  = 1;
-        bi.regions[0].base    = buf;
-        bi.regions[0].size    = 1;
-        bi.regions[0].protect = PAGE_EXECUTE_READ;
-        bi.region_count = 1;
+        BEACON_INFO bi;
+        setup_beacon_info(&bi, key, MASK_SIZE);
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Purpose       = PURPOSE_BEACON_MEMORY;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].AllocationBase = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].RegionSize     = 1;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].Label          = LABEL_TEXT;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].BaseAddress    = buf;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].VirtualSize    = 1;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].CurrentProtect = PAGE_EXECUTE_READ;
+        bi.allocatedMemory.AllocatedMemoryRegions[0].Sections[0].MaskSection    = TRUE;
 
-        int f = run_roundtrip(name, mask_fn, &bi, originals);
+        int f = run_roundtrip(name, mask_fn, &bi, originals, sizes, sec_bufs, 1);
         fail += f;
         if (f == 0) pass++;
 
@@ -447,8 +505,9 @@ static void xor_region(unsigned char *buf, unsigned int len,
     }
 }
 
-/* Reference mask implementation: XOR encrypt, dispatch call, XOR decrypt */
-static void reference_mask(PSM_BEACON_INFO bi, PFUNCTION_CALL fc) {
+/* Reference mask implementation: XOR encrypt, dispatch call, XOR decrypt
+ * Uses CS BEACON_INFO with nested region/section iteration. */
+static void reference_mask(PBEACON_INFO bi, PFUNCTION_CALL fc) {
     if (!fc) return;
 
     if (!fc->bMask) {
@@ -458,14 +517,20 @@ static void reference_mask(PSM_BEACON_INFO bi, PFUNCTION_CALL fc) {
         return;
     }
 
-    unsigned char *key     = bi->rc4_key;
-    unsigned int   key_len = 16;
+    unsigned char *key     = bi->mask;
+    unsigned int   key_len = MASK_SIZE;
 
-    /* Encrypt */
-    for (int i = 0; i < bi->region_count; i++) {
-        if (bi->regions[i].base && bi->regions[i].size) {
-            xor_region((unsigned char *)bi->regions[i].base,
-                       bi->regions[i].size, key, key_len);
+    /* Encrypt: iterate regions then sections */
+    for (int r = 0; r < 6; r++) {
+        ALLOCATED_MEMORY_REGION *reg = &bi->allocatedMemory.AllocatedMemoryRegions[r];
+        if (!reg->AllocationBase || reg->RegionSize == 0)
+            continue;
+        for (int s = 0; s < 8; s++) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if (!sec->BaseAddress || sec->VirtualSize == 0 || !sec->MaskSection)
+                continue;
+            xor_region((unsigned char *)sec->BaseAddress,
+                       (unsigned int)sec->VirtualSize, key, key_len);
         }
     }
 
@@ -473,11 +538,17 @@ static void reference_mask(PSM_BEACON_INFO bi, PFUNCTION_CALL fc) {
     fc->retValue = ((ULONG_PTR (__stdcall *)(ULONG_PTR, ULONG_PTR))fc->functionPtr)(
         fc->args[0], fc->args[1]);
 
-    /* Decrypt */
-    for (int i = 0; i < bi->region_count; i++) {
-        if (bi->regions[i].base && bi->regions[i].size) {
-            xor_region((unsigned char *)bi->regions[i].base,
-                       bi->regions[i].size, key, key_len);
+    /* Decrypt: iterate regions then sections */
+    for (int r = 0; r < 6; r++) {
+        ALLOCATED_MEMORY_REGION *reg = &bi->allocatedMemory.AllocatedMemoryRegions[r];
+        if (!reg->AllocationBase || reg->RegionSize == 0)
+            continue;
+        for (int s = 0; s < 8; s++) {
+            ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+            if (!sec->BaseAddress || sec->VirtualSize == 0 || !sec->MaskSection)
+                continue;
+            xor_region((unsigned char *)sec->BaseAddress,
+                       (unsigned int)sec->VirtualSize, key, key_len);
         }
     }
 }

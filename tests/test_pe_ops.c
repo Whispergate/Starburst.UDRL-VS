@@ -1,7 +1,7 @@
 /*
  * Unit tests for UDRL PE operations: LdrpImageHeader, LdrFunction,
  * section mapping, relocation processing, section protections,
- * UDRL_USER_DATA population, headerless loader variant, and full load cycle.
+ * USER_DATA/ALLOCATED_MEMORY population, headerless loader variant, and full load cycle.
  *
  * Core logic is copied verbatim from loader/src/\*.
  * Tests use synthetic PEs from mock_pe.h.
@@ -94,18 +94,6 @@ FUNC static DWORD SectionToProtect( DWORD ch ) {
     if ( r           ) return PAGE_READONLY;
     if ( w           ) return PAGE_WRITECOPY;
     return PAGE_NOACCESS;
-}
-
-FUNC static VOID GenerateRc4Key( PBYTE Key ) {
-    for ( int i = 0; i < 16; i += 4 ) {
-        DWORD tick;
-        tick = (DWORD)__rdtsc();
-        Key[i]     = (BYTE)( tick );
-        Key[i + 1] = (BYTE)( tick >> 8 );
-        Key[i + 2] = (BYTE)( tick >> 16 );
-        Key[i + 3] = (BYTE)( tick >> 24 );
-        for ( volatile int j = 0; j < 100; j++ ) {}
-    }
 }
 
 /* From loader/src/Ldr.c */

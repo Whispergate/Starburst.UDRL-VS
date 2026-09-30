@@ -2,13 +2,13 @@
  * UDRL Post-Load Validation Tool
  *
  * Validates that the UDRL loader correctly mapped a PE, resolved imports,
- * applied relocations, and populated UDRL_USER_DATA.
+ * applied relocations, and populated CS USER_DATA + ALLOCATED_MEMORY.
  *
  * Build (MinGW):
  *   x86_64-w64-mingw32-gcc -DUDRL_DEBUG -o loader_validate.exe loader_validate.c
  *
  * Usage:
- *   loader_validate.exe <hex_address_of_UDRL_USER_DATA>
+ *   loader_validate.exe <hex_address_of_USER_DATA>
  *   loader_validate.exe 0x7FFE12340000
  *
  * Or call udrl_post_load_validate() from your own code after the loader runs.
@@ -131,97 +131,91 @@ static const char *prot_name(DWORD p) {
  * udrl_post_load_validate
  *
  * Comprehensive post-load validation of the UDRL loader's work.
+ * Uses CS beacon.h 4.12 USER_DATA + ALLOCATED_MEMORY types.
  * Returns 0 if all checks pass, or the number of failures.
  */
-int udrl_post_load_validate(UDRL_USER_DATA *ud) {
+int udrl_post_load_validate(USER_DATA *ud) {
     int pass = 0;
     int fail = 0;
 
     UDRL_LOG_INFO("=== UDRL Post-Load Validation ===");
 
-    /* ---- 1. UDRL_USER_DATA validation ---- */
-    UDRL_LOG_INFO("--- Check 1: UDRL_USER_DATA ---");
+    /* ---- 1. USER_DATA validation ---- */
+    UDRL_LOG_INFO("--- Check 1: USER_DATA ---");
 
     if (!ud) {
-        UDRL_LOG_ERR("UDRL_USER_DATA pointer is NULL");
+        UDRL_LOG_ERR("USER_DATA pointer is NULL");
         fail++;
         return fail;
     }
 
-    if (ud->magic != UDRL_MAGIC) {
-        UDRL_LOG_ERR("Bad magic: 0x%llx (expected 0x%llx)",
-            (unsigned long long)ud->magic, (unsigned long long)UDRL_MAGIC);
+    if (ud->version == 0) {
+        UDRL_LOG_ERR("version is 0 (expected non-zero, e.g. 0x%x)", STARBURST_VERSION);
         fail++;
     } else {
-        UDRL_LOG_OK("Magic: OK");
+        UDRL_LOG_OK("version: 0x%x", ud->version);
         pass++;
     }
 
-    if (ud->load_type != LOAD_TYPE_VIRTUAL_ALLOC &&
-        ud->load_type != LOAD_TYPE_MODULE_STOMP) {
-        UDRL_LOG_ERR("Unknown load_type: %d", (int)ud->load_type);
+    if (!ud->allocatedMemory) {
+        UDRL_LOG_ERR("allocatedMemory pointer is NULL");
         fail++;
+        return fail;
     } else {
-        UDRL_LOG_OK("load_type: %d (%s)", (int)ud->load_type,
-            ud->load_type == LOAD_TYPE_VIRTUAL_ALLOC ? "VirtualAlloc" : "ModuleStomp");
+        UDRL_LOG_OK("allocatedMemory: %p", (void *)ud->allocatedMemory);
         pass++;
     }
 
-    if (!ud->agent_base) {
-        UDRL_LOG_ERR("agent_base is NULL");
-        fail++;
-    } else {
-        UDRL_LOG_OK("agent_base: %p", ud->agent_base);
-        pass++;
-    }
-
-    if (ud->agent_size == 0) {
-        UDRL_LOG_ERR("agent_size is 0");
-        fail++;
-    } else {
-        UDRL_LOG_OK("agent_size: 0x%x", (unsigned)ud->agent_size);
-        pass++;
-    }
-
-    if (ud->region_count == 0 || ud->region_count > MAX_UDRL_REGIONS) {
-        UDRL_LOG_ERR("region_count out of bounds: %d (expected 1..%d)",
-            (int)ud->region_count, MAX_UDRL_REGIONS);
-        fail++;
-    } else {
-        UDRL_LOG_OK("region_count: %d", (int)ud->region_count);
-        pass++;
-    }
-
-    /* rc4_key check */
+    /* Find the beacon region (PURPOSE_BEACON_MEMORY) for PE checks */
+    PBYTE base = NULL;
+    SIZE_T base_size = 0;
+    int beacon_region_idx = -1;
     {
-        BOOL key_ok = FALSE;
-        for (int i = 0; i < 16; i++) {
-            if (ud->rc4_key[i] != 0) { key_ok = TRUE; break; }
+        int region_count = 0;
+        for (int r = 0; r < 6; r++) {
+            const ALLOCATED_MEMORY_REGION *reg = &ud->allocatedMemory->AllocatedMemoryRegions[r];
+            if (!reg->AllocationBase || reg->RegionSize == 0)
+                continue;
+            region_count++;
+            UDRL_LOG_OK("region[%d]: purpose=%d base=%p size=0x%zx",
+                r, (int)reg->Purpose, reg->AllocationBase, reg->RegionSize);
+
+            if (reg->Purpose == PURPOSE_BEACON_MEMORY && beacon_region_idx < 0) {
+                beacon_region_idx = r;
+                base = (PBYTE)reg->AllocationBase;
+                base_size = reg->RegionSize;
+            }
         }
-        if (!key_ok) {
-            UDRL_LOG_ERR("rc4_key is all zeros");
+        if (region_count == 0) {
+            UDRL_LOG_ERR("No populated regions found in ALLOCATED_MEMORY");
             fail++;
         } else {
-            printf("[UDRL][+] rc4_key: ");
-            for (int i = 0; i < 16; i++) printf("%02x", ud->rc4_key[i]);
-            printf("\n");
+            UDRL_LOG_OK("Found %d populated region(s)", region_count);
             pass++;
         }
     }
 
-    /* ---- 2. PE header check at agent_base ---- */
+    if (beacon_region_idx < 0) {
+        UDRL_LOG_ERR("No region with PURPOSE_BEACON_MEMORY found");
+        fail++;
+    } else {
+        UDRL_LOG_OK("Beacon region index: %d, base=%p size=0x%zx",
+            beacon_region_idx, (void *)base, base_size);
+        pass++;
+    }
+
+    /* ---- 2. PE header check at beacon AllocationBase ---- */
     UDRL_LOG_INFO("--- Check 2: PE Headers ---");
 
-    PBYTE base = (PBYTE)ud->agent_base;
     if (!base) {
-        UDRL_LOG_ERR("Cannot check PE: agent_base is NULL");
+        UDRL_LOG_ERR("Cannot check PE: beacon AllocationBase is NULL");
         fail++;
         goto skip_pe_checks;
     }
 
     PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)base;
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-        UDRL_LOG_ERR("Bad DOS signature at agent_base: 0x%04x", dos->e_magic);
+        UDRL_LOG_ERR("Bad DOS signature at beacon base: 0x%04x", dos->e_magic);
         fail++;
         goto skip_pe_checks;
     } else {
@@ -343,8 +337,6 @@ int udrl_post_load_validate(UDRL_USER_DATA *ud) {
         ULONGLONG mapped_base_addr = (ULONGLONG)base;
         ULONGLONG preferred_base = nt->OptionalHeader.ImageBase;
 
-        /* After relocation, the mapped NT headers' ImageBase is updated
-         * by some loaders. The true test: did we load at preferred? */
         if (mapped_base_addr == preferred_base) {
             UDRL_LOG_OK("Loaded at preferred base 0x%llx, no relocations needed",
                 (unsigned long long)preferred_base);
@@ -355,7 +347,6 @@ int udrl_post_load_validate(UDRL_USER_DATA *ud) {
                 (unsigned long long)preferred_base,
                 (unsigned long long)(mapped_base_addr - preferred_base));
 
-            /* Verify relocation directory exists */
             DWORD reloc_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
             DWORD reloc_size = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
             if (!reloc_rva || !reloc_size) {
@@ -369,71 +360,85 @@ int udrl_post_load_validate(UDRL_USER_DATA *ud) {
         }
     }
 
-    /* ---- 6. Region bounds checking ---- */
-    UDRL_LOG_INFO("--- Check 6: Region Memory State ---");
+    /* ---- 6. Region + Section memory state ---- */
+    UDRL_LOG_INFO("--- Check 6: Region/Section Memory State ---");
     {
-        DWORD valid_regions = ud->region_count;
-        if (valid_regions > MAX_UDRL_REGIONS) valid_regions = MAX_UDRL_REGIONS;
-
-        for (DWORD i = 0; i < valid_regions; i++) {
-            if (!ud->regions[i].base) {
-                UDRL_LOG_ERR("region[%d]: base is NULL", (int)i);
-                fail++;
+        for (int r = 0; r < 6; r++) {
+            const ALLOCATED_MEMORY_REGION *reg = &ud->allocatedMemory->AllocatedMemoryRegions[r];
+            if (!reg->AllocationBase || reg->RegionSize == 0)
                 continue;
-            }
-            if (ud->regions[i].size == 0) {
-                UDRL_LOG_ERR("region[%d]: size is 0", (int)i);
-                fail++;
-                continue;
-            }
 
             MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery(ud->regions[i].base, &mbi, sizeof(mbi)) == 0) {
+            if (VirtualQuery(reg->AllocationBase, &mbi, sizeof(mbi)) == 0) {
                 UDRL_LOG_ERR("region[%d]: VirtualQuery failed at %p (error %d)",
-                    (int)i, ud->regions[i].base, (int)GetLastError());
+                    r, reg->AllocationBase, (int)GetLastError());
                 fail++;
             } else if (mbi.State != MEM_COMMIT) {
                 UDRL_LOG_ERR("region[%d]: %p not MEM_COMMIT (state=0x%x)",
-                    (int)i, ud->regions[i].base, (unsigned)mbi.State);
+                    r, reg->AllocationBase, (unsigned)mbi.State);
                 fail++;
             } else {
-                UDRL_LOG_OK("region[%d]: %p (0x%x bytes) is MEM_COMMIT",
-                    (int)i, ud->regions[i].base, (unsigned)ud->regions[i].size);
+                UDRL_LOG_OK("region[%d]: %p (0x%zx bytes) is MEM_COMMIT",
+                    r, reg->AllocationBase, reg->RegionSize);
                 pass++;
+            }
+
+            /* Validate individual sections */
+            for (int s = 0; s < 8; s++) {
+                const ALLOCATED_MEMORY_SECTION *sec = &reg->Sections[s];
+                if (!sec->BaseAddress || sec->VirtualSize == 0)
+                    continue;
+
+                if (VirtualQuery(sec->BaseAddress, &mbi, sizeof(mbi)) == 0) {
+                    UDRL_LOG_ERR("  region[%d].section[%d]: VirtualQuery failed at %p",
+                        r, s, sec->BaseAddress);
+                    fail++;
+                } else if (mbi.State != MEM_COMMIT) {
+                    UDRL_LOG_ERR("  region[%d].section[%d]: %p not MEM_COMMIT (state=0x%x)",
+                        r, s, sec->BaseAddress, (unsigned)mbi.State);
+                    fail++;
+                } else {
+                    UDRL_LOG_OK("  region[%d].section[%d]: label=%d base=%p vsize=0x%zx prot=%s mask=%d OK",
+                        r, s, (int)sec->Label, sec->BaseAddress, sec->VirtualSize,
+                        prot_name(mbi.Protect & 0xFF), (int)sec->MaskSection);
+                    pass++;
+                }
             }
         }
     }
 
     /* ---- 7. Module stomp specific checks ---- */
     UDRL_LOG_INFO("--- Check 7: Module Stomp ---");
-    if (ud->load_type == LOAD_TYPE_MODULE_STOMP) {
-        if (!ud->stomped_module) {
-            UDRL_LOG_ERR("load_type is MODULE_STOMP but stomped_module is NULL");
-            fail++;
-        } else {
-            char mod_path[MAX_PATH];
-            DWORD len = GetModuleFileNameA(ud->stomped_module, mod_path, MAX_PATH);
-            if (len == 0) {
-                UDRL_LOG_ERR("GetModuleFileName failed for stomped_module %p (error %d)",
-                    (void *)ud->stomped_module, (int)GetLastError());
+    {
+        BOOL found_stomp = FALSE;
+        for (int r = 0; r < 6; r++) {
+            const ALLOCATED_MEMORY_REGION *reg = &ud->allocatedMemory->AllocatedMemoryRegions[r];
+            if (!reg->AllocationBase || reg->RegionSize == 0)
+                continue;
+            if (reg->CleanupInformation.AllocationMethod != METHOD_MODULESTOMP)
+                continue;
+
+            found_stomp = TRUE;
+            HMODULE stomped = reg->CleanupInformation.AdditionalCleanupInformation.ModuleStompInfo.ModuleHandle;
+            if (!stomped) {
+                UDRL_LOG_ERR("region[%d]: METHOD_MODULESTOMP but ModuleHandle is NULL", r);
                 fail++;
             } else {
-                UDRL_LOG_OK("Stomped module: %s", mod_path);
-                pass++;
+                char mod_path[MAX_PATH];
+                DWORD len = GetModuleFileNameA(stomped, mod_path, MAX_PATH);
+                if (len == 0) {
+                    UDRL_LOG_ERR("GetModuleFileName failed for stomped module %p (error %d)",
+                        (void *)stomped, (int)GetLastError());
+                    fail++;
+                } else {
+                    UDRL_LOG_OK("region[%d]: Stomped module: %s", r, mod_path);
+                    pass++;
+                }
             }
         }
-
-        if (!ud->stomped_text_base || ud->stomped_text_size == 0) {
-            UDRL_LOG_ERR("stomped_text_base=%p stomped_text_size=0x%x (expected non-zero)",
-                ud->stomped_text_base, (unsigned)ud->stomped_text_size);
-            fail++;
-        } else {
-            UDRL_LOG_OK("Stomped .text: base=%p size=0x%x",
-                ud->stomped_text_base, (unsigned)ud->stomped_text_size);
-            pass++;
+        if (!found_stomp) {
+            UDRL_LOG_INFO("No regions with METHOD_MODULESTOMP, skipping stomp checks");
         }
-    } else {
-        UDRL_LOG_INFO("load_type is VirtualAlloc, skipping module stomp checks");
     }
 
 skip_pe_checks:
@@ -452,22 +457,22 @@ skip_pe_checks:
 
 /*
  * main: standalone entry point.
- * Pass the UDRL_USER_DATA address as a hex argument.
+ * Pass the USER_DATA address as a hex argument.
  */
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Usage: %s <hex_address_of_UDRL_USER_DATA>\n", argv[0]);
+        printf("Usage: %s <hex_address_of_USER_DATA>\n", argv[0]);
         printf("Example: %s 0x7FFE12340000\n", argv[0]);
         return 1;
     }
 
-    UDRL_USER_DATA *ud = (UDRL_USER_DATA *)(uintptr_t)strtoull(argv[1], NULL, 16);
+    USER_DATA *ud = (USER_DATA *)(uintptr_t)strtoull(argv[1], NULL, 16);
     if (!ud) {
         printf("Error: invalid address '%s'\n", argv[1]);
         return 1;
     }
 
-    printf("[UDRL] Validating UDRL_USER_DATA at %p\n", (void *)ud);
+    printf("[UDRL] Validating USER_DATA at %p\n", (void *)ud);
     int result = udrl_post_load_validate(ud);
     return result;
 }
