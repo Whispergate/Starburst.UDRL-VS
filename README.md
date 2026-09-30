@@ -150,6 +150,40 @@ The final binary layout is: `[loader shellcode] + [4-byte DLL length] + [DLL byt
 
 When `loader_type = udrl-vs` is selected, the sleep mask option is hidden. The builder automatically compiles and embeds the mask from the kit's `mask/` directory.
 
+### Standalone Testing (loader.x64.exe)
+
+When testing the UDRL loader standalone (outside the kit ZIP flow), the Starburst agent must be built with the correct build parameters. Example payload config (`starburst.dll.json`):
+
+```json
+{
+    "build_parameters": [
+        { "name": "sleep_mask",           "value": "sleepmask_vs" },
+        { "name": "sleepmask_vs_file",    "value": "" },
+        { "name": "sleepmask_vs_logging", "value": false },
+        { "name": "output_type",          "value": "dll" },
+        { "name": "loader_type",          "value": "default" }
+    ]
+}
+```
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `sleep_mask` | `sleepmask_vs` | **Required.** Must not be `default` — that compiles out the sleepmask-vs code path entirely. The builder maps this to `MASK_SLEEPMASK_VS`. |
+| `sleepmask_vs_file` | `""` (empty) | Uses the COFF already embedded in `sleepmask_vs_data.h`. Upload a `.o` file here to override. |
+| `sleepmask_vs_logging` | `false` | Set `true` for sleepmask debug output. |
+| `output_type` | `dll` | DLL output for reflective loading. |
+| `loader_type` | `default` | Use `default` when loading with this kit's standalone `loader.x64.exe`. Use `udrl-vs` only for the ZIP upload flow. |
+
+To embed a custom sleepmask COFF into the agent source (bypassing the builder upload):
+
+```bash
+cd mask && make           # produces dist/sleepmask.x64.o
+cd ../loader/scripts
+python3 ../../agent_code/scripts/embed_sleepmask.py mask/dist/sleepmask.x64.o
+```
+
+This writes `sleepmask_vs_data.h` with the COFF byte array. Rebuild the agent with `sleep_mask = sleepmask_vs` and the embedded COFF will be loaded at init.
+
 ## Stardust Framework Reference
 
 ### API Resolution
